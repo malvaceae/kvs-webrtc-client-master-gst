@@ -38,6 +38,7 @@ link_directories(${GOBJ2_LIBRARY_DIRS})
 add_executable(
   kvsWebrtcClientMasterGst
   kvsWebrtcClientMasterGst.c
+  commons.c
 )
 
 target_link_libraries(
