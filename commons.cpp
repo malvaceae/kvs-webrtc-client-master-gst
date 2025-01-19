@@ -1,6 +1,6 @@
 #include "commons.h"
 
-PKvsWebrtcConfig gKvsWebrtcConfig = NULL;
+PKvsWebrtcConfig gKvsWebrtcConfig = nullptr;
 
 VOID sigintHandler(INT32 sigNum)
 {
@@ -30,13 +30,12 @@ UINT32 setLogLevel()
   return logLevel;
 }
 
-STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConfig* ppKvsWebrtcConfig)
+STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConfig& pKvsWebrtcConfig)
 {
   STATUS retStatus = STATUS_SUCCESS;
-  PKvsWebrtcConfig pKvsWebrtcConfig = NULL;
 
   // KVS WebRTCの設定を初期化
-  CHK(pKvsWebrtcConfig = (PKvsWebrtcConfig) MEMCALLOC(1, SIZEOF(KvsWebrtcConfig)), STATUS_NOT_ENOUGH_MEMORY);
+  pKvsWebrtcConfig = new KvsWebrtcConfig;
 
   // 中断フラグ
   ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->isInterrupted, FALSE);
@@ -48,50 +47,39 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConf
   pKvsWebrtcConfig->cvar = CVAR_CREATE();
 
   // CA証明書のパスを取得
-  CHK_STATUS(getCaCertPath(&pKvsWebrtcConfig->pCaCertPath));
+  CHK_STATUS(getCaCertPath(pKvsWebrtcConfig->pCaCertPath));
 
   // 認証情報プロバイダーを作成
-  CHK_STATUS(createCredentialProvider(pKvsWebrtcConfig->pCaCertPath, &pKvsWebrtcConfig->pCredentialProvider));
+  CHK_STATUS(createCredentialProvider(pKvsWebrtcConfig->pCaCertPath, pKvsWebrtcConfig->pCredentialProvider));
 
   // クライアント情報を初期化
-  CHK_STATUS(initClientInfo(logLevel, &pKvsWebrtcConfig->clientInfo));
+  CHK_STATUS(initClientInfo(logLevel, pKvsWebrtcConfig->clientInfo));
 
   // チャネル情報を初期化
   CHK_STATUS(initChannelInfo(pChannelName,
                              pKvsWebrtcConfig->pCaCertPath,
                              GETENV(DEFAULT_REGION_ENV_VAR),
-                             &pKvsWebrtcConfig->channelInfo));
+                             pKvsWebrtcConfig->channelInfo));
 
   // コールバックを初期化
-  CHK_STATUS(initCallbacks((UINT64) pKvsWebrtcConfig, &pKvsWebrtcConfig->callbacks));
+  CHK_STATUS(initCallbacks(reinterpret_cast<UINT64>(pKvsWebrtcConfig), pKvsWebrtcConfig->callbacks));
 
-  // シグナリングクライアントに関するメトリクスのバージョン
-  pKvsWebrtcConfig->metrics.version = SIGNALING_CLIENT_METRICS_CURRENT_VERSION;
+  // シグナリングクライアントに関するメトリクス初期化
+  CHK_STATUS(initMetrics(pKvsWebrtcConfig->metrics));
 
 CleanUp:
 
   if (STATUS_FAILED(retStatus)) {
-    freeKvsWebrtcConfig(&pKvsWebrtcConfig);
-  }
-
-  if (ppKvsWebrtcConfig) {
-    *ppKvsWebrtcConfig = pKvsWebrtcConfig;
+    freeKvsWebrtcConfig(pKvsWebrtcConfig);
   }
 
   return retStatus;
 }
 
-STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig* ppKvsWebrtcConfig)
+STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig& pKvsWebrtcConfig)
 {
   ENTERS();
   STATUS retStatus = STATUS_SUCCESS;
-  PKvsWebrtcConfig pKvsWebrtcConfig;
-
-  // KVS WebRTCの設定
-  CHK(pKvsWebrtcConfig = *ppKvsWebrtcConfig, retStatus);
-
-  // KVS WebRTCを終了
-  CHK_STATUS(deinitKvsWebRtc());
 
   // ミューテックスを解放
   if (IS_VALID_MUTEX_VALUE(pKvsWebrtcConfig->kvsWebrtcConfigObjLock)) {
@@ -107,7 +95,8 @@ STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig* ppKvsWebrtcConfig)
   freeIotCredentialProvider(&pKvsWebrtcConfig->pCredentialProvider);
 
   // KVS WebRTCの設定を解放
-  SAFE_MEMFREE(*ppKvsWebrtcConfig);
+  delete pKvsWebrtcConfig;
+  pKvsWebrtcConfig = nullptr;
 
 CleanUp:
 
@@ -115,19 +104,19 @@ CleanUp:
   return retStatus;
 }
 
-STATUS getCaCertPath(PCHAR* ppCaCertPath)
+STATUS getCaCertPath(PCHAR& pCaCertPath)
 {
   STATUS retStatus = STATUS_SUCCESS;
 
   // CA証明書のパス
-  CHK_ERR(*ppCaCertPath = GETENV(CACERT_PATH_ENV_VAR), STATUS_INVALID_OPERATION, "環境変数「%s」は必須です。", CACERT_PATH_ENV_VAR);
+  CHK_ERR(pCaCertPath = GETENV(CACERT_PATH_ENV_VAR), STATUS_INVALID_OPERATION, "環境変数「%s」は必須です。", CACERT_PATH_ENV_VAR);
 
 CleanUp:
 
   return retStatus;
 }
 
-STATUS createCredentialProvider(PCHAR pCaCertPath, PAwsCredentialProvider* ppCredentialProvider)
+STATUS createCredentialProvider(PCHAR pCaCertPath, PAwsCredentialProvider& pCredentialProvider)
 {
   STATUS retStatus = STATUS_SUCCESS;
   PCHAR pIotCoreCredentialEndPoint;
@@ -148,109 +137,121 @@ STATUS createCredentialProvider(PCHAR pCaCertPath, PAwsCredentialProvider* ppCre
                                             pCaCertPath,
                                             pIotCoreRoleAlias,
                                             pIotCoreThingName,
-                                            ppCredentialProvider));
+                                            &pCredentialProvider));
 
 CleanUp:
 
   return retStatus;
 }
 
-STATUS initClientInfo(UINT32 logLevel, PSignalingClientInfo pClientInfo)
+STATUS initClientInfo(UINT32 logLevel, SignalingClientInfo& clientInfo)
 {
   STATUS retStatus = STATUS_SUCCESS;
 
   // クライアント情報のバージョン
-  pClientInfo->version = SIGNALING_CLIENT_INFO_CURRENT_VERSION;
+  clientInfo.version = SIGNALING_CLIENT_INFO_CURRENT_VERSION;
 
   // クライアントID
-  STRCPY(pClientInfo->clientId, CLIENT_ID);
+  STRCPY(clientInfo.clientId, CLIENT_ID);
 
   // ログレベル
-  pClientInfo->loggingLevel = logLevel;
+  clientInfo.loggingLevel = logLevel;
 
   // キャッシュファイルのパス
-  pClientInfo->cacheFilePath = NULL;
+  clientInfo.cacheFilePath = NULL;
 
   // 再作成の試行回数
-  pClientInfo->signalingClientCreationMaxRetryAttempts = CREATE_SIGNALING_CLIENT_RETRY_ATTEMPTS_SENTINEL_VALUE;
+  clientInfo.signalingClientCreationMaxRetryAttempts = CREATE_SIGNALING_CLIENT_RETRY_ATTEMPTS_SENTINEL_VALUE;
 
 CleanUp:
 
   return retStatus;
 }
 
-STATUS initChannelInfo(PCHAR pChannelName, PCHAR pCaCertPath, PCHAR pRegion, PChannelInfo pChannelInfo)
+STATUS initChannelInfo(PCHAR pChannelName, PCHAR pCaCertPath, PCHAR pRegion, ChannelInfo& channelInfo)
 {
   STATUS retStatus = STATUS_SUCCESS;
 
   // チャネル情報のバージョン
-  pChannelInfo->version = CHANNEL_INFO_CURRENT_VERSION;
+  channelInfo.version = CHANNEL_INFO_CURRENT_VERSION;
 
   // チャネル名
-  pChannelInfo->pChannelName = pChannelName;
+  channelInfo.pChannelName = pChannelName;
 
   // リージョン
-  pChannelInfo->pRegion = pRegion ? pRegion : DEFAULT_AWS_REGION;
+  channelInfo.pRegion = pRegion ? pRegion : const_cast<PCHAR>(DEFAULT_AWS_REGION);
 
   // KMSキーID
-  pChannelInfo->pKmsKeyId = NULL;
+  channelInfo.pKmsKeyId = NULL;
 
   // ストリームに紐付くタグの数
-  pChannelInfo->tagCount = 0;
+  channelInfo.tagCount = 0;
 
   // ストリームに紐付くタグ
-  pChannelInfo->pTags = NULL;
+  channelInfo.pTags = NULL;
 
   // チャネルタイプ
-  pChannelInfo->channelType = SIGNALING_CHANNEL_TYPE_SINGLE_MASTER;
+  channelInfo.channelType = SIGNALING_CHANNEL_TYPE_SINGLE_MASTER;
 
   // チャネルロールタイプ
-  pChannelInfo->channelRoleType = SIGNALING_CHANNEL_ROLE_TYPE_MASTER;
+  channelInfo.channelRoleType = SIGNALING_CHANNEL_ROLE_TYPE_MASTER;
 
   // キャッシュポリシー
-  pChannelInfo->cachingPolicy = SIGNALING_API_CALL_CACHE_TYPE_FILE;
+  channelInfo.cachingPolicy = SIGNALING_API_CALL_CACHE_TYPE_FILE;
 
   // キャッシュ期間
-  pChannelInfo->cachingPeriod = SIGNALING_API_CALL_CACHE_TTL_SENTINEL_VALUE;
+  channelInfo.cachingPeriod = SIGNALING_API_CALL_CACHE_TTL_SENTINEL_VALUE;
 
   // ICEサーバーの構成情報を非同期で取得する
-  pChannelInfo->asyncIceServerConfig = TRUE;
+  channelInfo.asyncIceServerConfig = TRUE;
 
   // エラーの発生時に再試行する
-  pChannelInfo->retry = TRUE;
+  channelInfo.retry = TRUE;
 
   // 再接続する
-  pChannelInfo->reconnect = TRUE;
+  channelInfo.reconnect = TRUE;
 
   // CA証明書のパス
-  pChannelInfo->pCertPath = pCaCertPath;
+  channelInfo.pCertPath = pCaCertPath;
 
   // メッセージのTTL (60ns)
-  pChannelInfo->messageTtl = 0;
+  channelInfo.messageTtl = 0;
 
 CleanUp:
 
   return retStatus;
 }
 
-STATUS initCallbacks(UINT64 customData, PSignalingClientCallbacks pCallbacks)
+STATUS initCallbacks(UINT64 customData, SignalingClientCallbacks& callbacks)
 {
   STATUS retStatus = STATUS_SUCCESS;
 
   // コールバックのバージョン
-  pCallbacks->version = SIGNALING_CLIENT_CALLBACKS_CURRENT_VERSION;
+  callbacks.version = SIGNALING_CLIENT_CALLBACKS_CURRENT_VERSION;
 
   // カスタムデータ
-  pCallbacks->customData = customData;
+  callbacks.customData = customData;
 
   // メッセージの受信時
-  pCallbacks->messageReceivedFn = onMessageReceived;
+  callbacks.messageReceivedFn = onMessageReceived;
 
   // クライアント状態の変化時
-  pCallbacks->stateChangeFn = onStateChanged;
+  callbacks.stateChangeFn = onStateChanged;
 
   // エラーの発生時
-  pCallbacks->errorReportFn = onErrorReport;
+  callbacks.errorReportFn = onErrorReport;
+
+CleanUp:
+
+  return retStatus;
+}
+
+STATUS initMetrics(SignalingClientMetrics& metrics)
+{
+  STATUS retStatus = STATUS_SUCCESS;
+
+  // シグナリングクライアントに関するメトリクスのバージョン
+  metrics.version = SIGNALING_CLIENT_METRICS_CURRENT_VERSION;
 
 CleanUp:
 
@@ -292,6 +293,21 @@ STATUS initSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
 
   // SIGINTハンドラ用の変数に設定を格納
   gKvsWebrtcConfig = pKvsWebrtcConfig;
+
+CleanUp:
+
+  return retStatus;
+}
+
+STATUS deinitSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
+{
+  STATUS retStatus = STATUS_SUCCESS;
+
+  // シグナリングクライアントを解放
+  CHK_STATUS(freeSignalingClient(&pKvsWebrtcConfig->signalingHandle));
+
+  // SIGINTハンドラ用の変数を初期化
+  gKvsWebrtcConfig = nullptr;
 
 CleanUp:
 

@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.14)
 
-project(kvsWebrtcClientMasterGst)
+project(
+  kvsWebrtcClientMasterGst
+  VERSION 0.1.0
+  LANGUAGES CXX
+)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -37,8 +41,13 @@ link_directories(${GOBJ2_LIBRARY_DIRS})
 
 add_executable(
   kvsWebrtcClientMasterGst
-  kvsWebrtcClientMasterGst.c
-  commons.c
+  kvsWebrtcClientMasterGst.cpp
+  commons.cpp
+)
+
+target_compile_features(
+  kvsWebrtcClientMasterGst
+  PUBLIC cxx_std_20
 )
 
 target_link_libraries(
@@ -52,5 +61,4 @@ target_link_libraries(
   ${GST_LIBRARIES}
   ${GST_APP_LIBRARIES}
   ${GOBJ2_LIBRARIES}
-  ${Intl}
 )

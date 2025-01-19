@@ -5,7 +5,7 @@
 INT32 main(INT32 argc, CHAR* argv[])
 {
   STATUS retStatus = STATUS_SUCCESS;
-  PKvsWebrtcConfig pKvsWebrtcConfig = NULL;
+  PKvsWebrtcConfig pKvsWebrtcConfig = nullptr;
   PCHAR pChannelName;
 
   SET_INSTRUMENTED_ALLOCATORS();
@@ -24,7 +24,7 @@ INT32 main(INT32 argc, CHAR* argv[])
   gst_init(&argc, &argv);
 
   // KVS WebRTCの設定を作成
-  CHK_STATUS(createKvsWebrtcConfig(pChannelName, logLevel, &pKvsWebrtcConfig));
+  CHK_STATUS(createKvsWebrtcConfig(pChannelName, logLevel, pKvsWebrtcConfig));
 
   // KVS WebRTCを初期化
   CHK_STATUS(initKvsWebRtc());
@@ -38,23 +38,18 @@ INT32 main(INT32 argc, CHAR* argv[])
 CleanUp:
 
   if (STATUS_FAILED(retStatus)) {
-    DLOGE("Terminated with status code: 0x%08x", retStatus);
+    DLOGE("ステータスコード「0x%08x」で終了しました。", retStatus);
   }
 
   if (pKvsWebrtcConfig) {
     // シグナリングクライアントを解放
-    retStatus = freeSignalingClient(&pKvsWebrtcConfig->signalingHandle);
+    deinitSignaling(pKvsWebrtcConfig);
 
-    if (STATUS_FAILED(retStatus)) {
-      DLOGE("freeSignalingClient(): operation returned status code: 0x%08x", retStatus);
-    }
+    // KVS WebRTCを終了
+    deinitKvsWebRtc();
 
     // KVS WebRTCの設定を解放
-    retStatus = freeKvsWebrtcConfig(&pKvsWebrtcConfig);
-
-    if (STATUS_FAILED(retStatus)) {
-      DLOGE("freeKvsWebrtcConfig(): operation returned status code: 0x%08x", retStatus);
-    }
+    freeKvsWebrtcConfig(pKvsWebrtcConfig);
   }
 
   RESET_INSTRUMENTED_ALLOCATORS();
