@@ -1,5 +1,5 @@
-#ifndef __KVS_INCLUDE__
-#define __KVS_INCLUDE__
+#ifndef KVS_HPP_
+#define KVS_HPP_
 
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 
@@ -45,7 +45,7 @@ struct KvsWebrtcConfig {
 
 using PKvsWebrtcConfig = KvsWebrtcConfig*;
 
-VOID sigintHandler(INT32);
+VOID setSigintHandler(PKvsWebrtcConfig&);
 UINT32 setLogLevel();
 STATUS createKvsWebrtcConfig(PCHAR, UINT32, PKvsWebrtcConfig&);
 STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig&);

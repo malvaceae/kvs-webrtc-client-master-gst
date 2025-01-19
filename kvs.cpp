@@ -1,20 +1,31 @@
 #include "kvs.hpp"
+#include <functional>
 
-PKvsWebrtcConfig gKvsWebrtcConfig = nullptr;
+namespace {
+  std::function<VOID(INT32)> sigintHandler;
+}
 
-VOID sigintHandler(INT32 sigNum)
+VOID setSigintHandler(PKvsWebrtcConfig& pKvsWebrtcConfig)
 {
-  UNUSED_PARAM(sigNum);
+  // SIGINTハンドラ
+  sigintHandler = [&](INT32 sigNum) {
+    UNUSED_PARAM(sigNum);
 
-  if (gKvsWebrtcConfig) {
-    // 中断フラグをON
-    ATOMIC_STORE_BOOL(&gKvsWebrtcConfig->isInterrupted, TRUE);
+    if (pKvsWebrtcConfig) {
+      // 中断フラグをON
+      ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->isInterrupted, TRUE);
 
-    // ブロックを解除
-    if (IS_VALID_CVAR_VALUE(gKvsWebrtcConfig->cvar)) {
-      CVAR_BROADCAST(gKvsWebrtcConfig->cvar);
+      // ブロックを解除
+      if (IS_VALID_CVAR_VALUE(pKvsWebrtcConfig->cvar)) {
+        CVAR_BROADCAST(pKvsWebrtcConfig->cvar);
+      }
     }
-  }
+  };
+
+  // SIGINTハンドラを設定
+  signal(SIGINT, [](INT32 sigNum) {
+    sigintHandler(sigNum);
+  });
 }
 
 UINT32 setLogLevel()
@@ -291,9 +302,6 @@ STATUS initSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
   DLOGP(      "fetchClientTime: %" PRIu64 " ms", pKvsWebrtcConfig->metrics.signalingClientStats.fetchClientTime);
   DLOGP(    "connectClientTime: %" PRIu64 " ms", pKvsWebrtcConfig->metrics.signalingClientStats.connectClientTime);
 
-  // SIGINTハンドラ用の変数に設定を格納
-  gKvsWebrtcConfig = pKvsWebrtcConfig;
-
 CleanUp:
 
   return retStatus;
@@ -305,9 +313,6 @@ STATUS deinitSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
 
   // シグナリングクライアントを解放
   CHK_STATUS(freeSignalingClient(&pKvsWebrtcConfig->signalingHandle));
-
-  // SIGINTハンドラ用の変数を初期化
-  gKvsWebrtcConfig = nullptr;
 
 CleanUp:
 

@@ -7,14 +7,15 @@ INT32 main(INT32 argc, CHAR* argv[])
   STATUS retStatus = STATUS_SUCCESS;
   PKvsWebrtcConfig pKvsWebrtcConfig = nullptr;
   PCHAR pChannelName;
+  UINT32 logLevel;
 
   SET_INSTRUMENTED_ALLOCATORS();
 
   // ログレベル
-  UINT32 logLevel = setLogLevel();
+  logLevel = setLogLevel();
 
   // SIGINTハンドラを設定
-  signal(SIGINT, sigintHandler);
+  setSigintHandler(pKvsWebrtcConfig);
 
   // チャネル名
   CHK_ERR(argc > 1, STATUS_INVALID_OPERATION, "チャネル名は必須です。");
