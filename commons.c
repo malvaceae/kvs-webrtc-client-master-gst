@@ -22,7 +22,7 @@ UINT32 setLogLevel()
   PCHAR pLogLevel;
   UINT32 logLevel;
 
-  if (NULL == (pLogLevel = GETENV(DEBUG_LOG_LEVEL_ENV_VAR)) || STATUS_FAILED(STRTOUI32(pLogLevel, NULL, 10, &logLevel))) {
+  if (!(pLogLevel = GETENV(DEBUG_LOG_LEVEL_ENV_VAR)) || STATUS_FAILED(STRTOUI32(pLogLevel, NULL, 10, &logLevel))) {
     logLevel = LOG_LEVEL_WARN;
   }
 
@@ -34,9 +34,6 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConf
 {
   STATUS retStatus = STATUS_SUCCESS;
   PKvsWebrtcConfig pKvsWebrtcConfig = NULL;
-
-  // NULLチェック
-  CHK(ppKvsWebrtcConfig, STATUS_NULL_ARG);
 
   // KVS WebRTCの設定を初期化
   CHK(pKvsWebrtcConfig = (PKvsWebrtcConfig) MEMCALLOC(1, SIZEOF(KvsWebrtcConfig)), STATUS_NOT_ENOUGH_MEMORY);
@@ -90,11 +87,8 @@ STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig* ppKvsWebrtcConfig)
   STATUS retStatus = STATUS_SUCCESS;
   PKvsWebrtcConfig pKvsWebrtcConfig;
 
-  // NULLチェック
-  CHK(ppKvsWebrtcConfig, STATUS_NULL_ARG);
-
   // KVS WebRTCの設定
-  pKvsWebrtcConfig = *ppKvsWebrtcConfig;
+  CHK(pKvsWebrtcConfig = *ppKvsWebrtcConfig, retStatus);
 
   // KVS WebRTCを終了
   CHK_STATUS(deinitKvsWebRtc());
@@ -195,6 +189,9 @@ STATUS initChannelInfo(PCHAR pChannelName, PCHAR pCaCertPath, PCHAR pRegion, PCh
   // チャネル名
   pChannelInfo->pChannelName = pChannelName;
 
+  // リージョン
+  pChannelInfo->pRegion = pRegion ? pRegion : DEFAULT_AWS_REGION;
+
   // KMSキーID
   pChannelInfo->pKmsKeyId = NULL;
 
@@ -230,11 +227,6 @@ STATUS initChannelInfo(PCHAR pChannelName, PCHAR pCaCertPath, PCHAR pRegion, PCh
 
   // メッセージのTTL (60ns)
   pChannelInfo->messageTtl = 0;
-
-  // リージョン
-  if (NULL == (pChannelInfo->pRegion = pRegion)) {
-    pChannelInfo->pRegion = DEFAULT_AWS_REGION;
-  }
 
 CleanUp:
 
@@ -303,6 +295,38 @@ STATUS initSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
 
 CleanUp:
 
+  return retStatus;
+}
+
+STATUS loopSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
+{
+  ENTERS();
+  STATUS retStatus = STATUS_SUCCESS;
+  BOOL isObjLocked = FALSE;
+
+  // メインループ
+  while (!ATOMIC_LOAD_BOOL(&pKvsWebrtcConfig->isInterrupted)) {
+    // ロックを開始
+    MUTEX_LOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
+    isObjLocked = TRUE;
+
+    // 5秒間スリープ
+    CVAR_WAIT(pKvsWebrtcConfig->cvar, pKvsWebrtcConfig->kvsWebrtcConfigObjLock, (5 * HUNDREDS_OF_NANOS_IN_A_SECOND));
+
+    // ロックを解除
+    MUTEX_UNLOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
+    isObjLocked = FALSE;
+  }
+
+CleanUp:
+
+  CHK_LOG_ERR(retStatus);
+
+  if (isObjLocked) {
+    MUTEX_UNLOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
+  }
+
+  LEAVES();
   return retStatus;
 }
 

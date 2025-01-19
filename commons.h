@@ -53,6 +53,7 @@ STATUS initClientInfo(UINT32, PSignalingClientInfo);
 STATUS initChannelInfo(PCHAR, PCHAR, PCHAR, PChannelInfo);
 STATUS initCallbacks(UINT64, PSignalingClientCallbacks);
 STATUS initSignaling(PKvsWebrtcConfig);
+STATUS loopSignaling(PKvsWebrtcConfig);
 STATUS onMessageReceived(UINT64, PReceivedSignalingMessage);
 STATUS onStateChanged(UINT64, SIGNALING_CLIENT_STATE);
 STATUS onErrorReport(UINT64, STATUS, PCHAR, UINT32);

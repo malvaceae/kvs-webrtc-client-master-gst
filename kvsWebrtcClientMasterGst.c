@@ -33,18 +33,7 @@ INT32 main(INT32 argc, CHAR* argv[])
   CHK_STATUS(initSignaling(pKvsWebrtcConfig));
 
   // メインループ
-  while (!ATOMIC_LOAD_BOOL(&pKvsWebrtcConfig->isInterrupted)) {
-    // ロックを開始
-    MUTEX_LOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
-
-    // 5秒間スリープ
-    CVAR_WAIT(pKvsWebrtcConfig->cvar,
-              pKvsWebrtcConfig->kvsWebrtcConfigObjLock,
-              5 * HUNDREDS_OF_NANOS_IN_A_SECOND);
-
-    // ロックを解除
-    MUTEX_UNLOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
-  }
+  CHK_STATUS(loopSignaling(pKvsWebrtcConfig));
 
 CleanUp:
 
