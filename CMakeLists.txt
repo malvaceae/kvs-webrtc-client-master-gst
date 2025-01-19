@@ -42,7 +42,7 @@ link_directories(${GOBJ2_LIBRARY_DIRS})
 add_executable(
   kvsWebrtcClientMasterGst
   kvsWebrtcClientMasterGst.cpp
-  commons.cpp
+  kvs.cpp
 )
 
 target_compile_features(

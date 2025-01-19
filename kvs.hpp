@@ -1,5 +1,5 @@
-#ifndef __COMMONS_INCLUDE__
-#define __COMMONS_INCLUDE__
+#ifndef __KVS_INCLUDE__
+#define __KVS_INCLUDE__
 
 #include <com/amazonaws/kinesis/video/webrtcclient/Include.h>
 
