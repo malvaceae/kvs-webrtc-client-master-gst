@@ -4,15 +4,14 @@
 
 INT32 main(INT32 argc, CHAR* argv[])
 {
-  STATUS retStatus = STATUS_SUCCESS;
+  auto retStatus = STATUS_SUCCESS;
   PKvsWebrtcConfig pKvsWebrtcConfig = nullptr;
   PCHAR pChannelName;
-  UINT32 logLevel;
 
   SET_INSTRUMENTED_ALLOCATORS();
 
   // ログレベル
-  logLevel = setLogLevel();
+  auto logLevel = setLogLevel();
 
   // SIGINTハンドラを設定
   setSigintHandler(pKvsWebrtcConfig);
@@ -42,16 +41,17 @@ CleanUp:
     DLOGE("ステータスコード「0x%08x」で終了しました。", retStatus);
   }
 
-  if (pKvsWebrtcConfig) {
-    // シグナリングクライアントを解放
-    deinitSignaling(pKvsWebrtcConfig);
+  // シグナリングクライアントを解放
+  deinitSignaling(pKvsWebrtcConfig);
 
-    // KVS WebRTCを終了
-    deinitKvsWebRtc();
+  // KVS WebRTCを終了
+  deinitKvsWebRtc();
 
-    // KVS WebRTCの設定を解放
-    freeKvsWebrtcConfig(pKvsWebrtcConfig);
-  }
+  // KVS WebRTCの設定を解放
+  freeKvsWebrtcConfig(pKvsWebrtcConfig);
+
+  // GStreamerを終了
+  gst_deinit();
 
   RESET_INSTRUMENTED_ALLOCATORS();
 
