@@ -10,7 +10,7 @@ include(FetchContent)
 FetchContent_Declare(
   webrtc
   GIT_REPOSITORY https://github.com/awslabs/amazon-kinesis-video-streams-webrtc-sdk-c.git
-  GIT_TAG        v1.12.0
+  GIT_TAG        v1.15.0
 )
 
 set(BUILD_SAMPLE OFF)
