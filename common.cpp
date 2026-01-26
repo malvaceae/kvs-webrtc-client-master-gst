@@ -89,11 +89,17 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, std::unique_pt
   // 終了フラグ
   ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->isTerminated, FALSE);
 
-  // ミューテックス
+  // 設定オブジェクト保護用ミューテックス
   pKvsWebrtcConfig->kvsWebrtcConfigObjLock = MUTEX_CREATE(TRUE);
+
+  // シグナリングメッセージ送信用ミューテックス
+  pKvsWebrtcConfig->signalingSendMessageLock = MUTEX_CREATE(FALSE);
 
   // 条件変数
   pKvsWebrtcConfig->cvar = CVAR_CREATE();
+
+  // シグナリングクライアント再作成フラグ
+  ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->recreateSignalingClient, FALSE);
 
   // ICEサーバーの数
   pKvsWebrtcConfig->iceUriCount = 0;
@@ -139,9 +145,14 @@ STATUS freeKvsWebrtcConfig(std::unique_ptr<KvsWebrtcConfig>& pKvsWebrtcConfig)
   // NULLチェック
   CHK(pKvsWebrtcConfig, retStatus);
 
-  // ミューテックスを解放
+  // 設定オブジェクト保護用ミューテックスを解放
   if (IS_VALID_MUTEX_VALUE(pKvsWebrtcConfig->kvsWebrtcConfigObjLock)) {
     MUTEX_FREE(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
+  }
+
+  // シグナリングメッセージ送信用ミューテックスを解放
+  if (IS_VALID_MUTEX_VALUE(pKvsWebrtcConfig->signalingSendMessageLock)) {
+    MUTEX_FREE(pKvsWebrtcConfig->signalingSendMessageLock);
   }
 
   // 条件変数を解放
@@ -593,6 +604,21 @@ STATUS loopSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
       return !value.second;
     });
 
+    // シグナリングクライアントの再作成が必要か確認
+    if (ATOMIC_LOAD_BOOL(&pKvsWebrtcConfig->recreateSignalingClient)) {
+      // シグナリングクライアントを再作成
+      DLOGI("Recreating signaling client");
+      CHK_STATUS(freeSignalingClient(&pKvsWebrtcConfig->signalingHandle));
+      CHK_STATUS(createSignalingClientSync(&pKvsWebrtcConfig->clientInfo,
+                                           &pKvsWebrtcConfig->channelInfo,
+                                           &pKvsWebrtcConfig->callbacks,
+                                           pKvsWebrtcConfig->pCredentialProvider,
+                                           &pKvsWebrtcConfig->signalingHandle));
+      CHK_STATUS(signalingClientFetchSync(pKvsWebrtcConfig->signalingHandle));
+      CHK_STATUS(signalingClientConnectSync(pKvsWebrtcConfig->signalingHandle));
+      ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->recreateSignalingClient, FALSE);
+    }
+
     // 5秒間スリープ
     CVAR_WAIT(pKvsWebrtcConfig->cvar, pKvsWebrtcConfig->kvsWebrtcConfigObjLock, (5 * HUNDREDS_OF_NANOS_IN_A_SECOND));
 
@@ -672,6 +698,7 @@ STATUS sendAnswer(PKvsWebrtcStreamingSession pStreamingSession)
 {
   auto retStatus = STATUS_SUCCESS;
   auto pKvsWebrtcConfig = pStreamingSession->pKvsWebrtcConfig;
+  auto isLocked = FALSE;
   UINT32 signalingMessageLen = MAX_SIGNALING_MESSAGE_LEN;
   SignalingMessage signalingMessage;
 
@@ -695,10 +722,19 @@ STATUS sendAnswer(PKvsWebrtcStreamingSession pStreamingSession)
   // 関連付けID
   SNPRINTF(signalingMessage.correlationId, MAX_CORRELATION_ID_LEN, "%llu", GETTIME());
 
+  // ロックを開始
+  MUTEX_LOCK(pKvsWebrtcConfig->signalingSendMessageLock);
+  isLocked = TRUE;
+
   // シグナリングメッセージを送信
   CHK_STATUS(signalingClientSendMessageSync(pKvsWebrtcConfig->signalingHandle, &signalingMessage));
 
 CleanUp:
+
+  // ロックを解除
+  if (isLocked) {
+    MUTEX_UNLOCK(pKvsWebrtcConfig->signalingSendMessageLock);
+  }
 
   CHK_LOG_ERR(retStatus);
 
@@ -712,6 +748,7 @@ STATUS sendIceCandidate(PKvsWebrtcStreamingSession pStreamingSession, PCHAR cand
 {
   auto retStatus = STATUS_SUCCESS;
   auto pKvsWebrtcConfig = pStreamingSession->pKvsWebrtcConfig;
+  auto isLocked = FALSE;
   SignalingMessage signalingMessage;
 
   // NULLチェック
@@ -733,10 +770,19 @@ STATUS sendIceCandidate(PKvsWebrtcStreamingSession pStreamingSession, PCHAR cand
   // 関連付けID
   signalingMessage.correlationId[0] = '\0';
 
+  // ロックを開始
+  MUTEX_LOCK(pKvsWebrtcConfig->signalingSendMessageLock);
+  isLocked = TRUE;
+
   // シグナリングメッセージを送信
   CHK_STATUS(signalingClientSendMessageSync(pKvsWebrtcConfig->signalingHandle, &signalingMessage));
 
 CleanUp:
+
+  // ロックを解除
+  if (isLocked) {
+    MUTEX_UNLOCK(pKvsWebrtcConfig->signalingSendMessageLock);
+  }
 
   CHK_LOG_ERR(retStatus);
 
@@ -958,11 +1004,20 @@ CleanUp:
  */
 STATUS onSignalingClientError(UINT64 customData, STATUS status, PCHAR message, UINT32 messageLen)
 {
-  UNUSED_PARAM(customData);
   auto retStatus = STATUS_SUCCESS;
+  auto pKvsWebrtcConfig = reinterpret_cast<PKvsWebrtcConfig>(customData);
 
   // ログを出力
   DLOGW("status: 0x%08x, message: %s, messageLen: %d", status, message, messageLen);
+
+  // 特定のエラーの場合はシグナリングクライアントを再作成
+  if (
+    status == STATUS_SIGNALING_ICE_CONFIG_REFRESH_FAILED ||
+    status == STATUS_SIGNALING_RECONNECT_FAILED
+  ) {
+    ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->recreateSignalingClient, TRUE);
+    CVAR_BROADCAST(pKvsWebrtcConfig->cvar);
+  }
 
 CleanUp:
 

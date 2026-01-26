@@ -41,11 +41,17 @@ struct KvsWebrtcConfig {
   // 終了フラグ
   volatile ATOMIC_BOOL isTerminated;
 
-  // ミューテックス
+  // 設定オブジェクト保護用ミューテックス
   MUTEX kvsWebrtcConfigObjLock;
+
+  // シグナリングメッセージ送信用ミューテックス
+  MUTEX signalingSendMessageLock;
 
   // 条件変数
   CVAR cvar;
+
+  // シグナリングクライアント再作成フラグ
+  volatile ATOMIC_BOOL recreateSignalingClient;
 
   // ストリーミングセッションのマップ
   std::unordered_map<std::string, std::unique_ptr<KvsWebrtcStreamingSession>> streamingSessions;
