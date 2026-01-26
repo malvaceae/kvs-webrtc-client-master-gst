@@ -1,14 +1,37 @@
-#include "kvs.hpp"
+#include "common.hpp"
 #include <functional>
 
 namespace {
   std::function<VOID(INT32)> sigintHandler;
 }
 
-VOID setSigintHandler(PKvsWebrtcConfig& pKvsWebrtcConfig)
+// ============================================================================
+// ユーティリティ
+// ============================================================================
+
+/**
+ * @brief ログレベルを設定する
+ */
+UINT32 setLogLevel()
+{
+  PCHAR pLogLevel;
+  UINT32 logLevel;
+
+  if (!(pLogLevel = GETENV(DEBUG_LOG_LEVEL_ENV_VAR)) || STATUS_FAILED(STRTOUI32(pLogLevel, NULL, 10, &logLevel))) {
+    logLevel = LOG_LEVEL_WARN;
+  }
+
+  SET_LOGGER_LOG_LEVEL(logLevel);
+  return logLevel;
+}
+
+/**
+ * @brief SIGINTハンドラを設定する
+ */
+VOID setSigintHandler(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   // SIGINTハンドラ
-  sigintHandler = [&](INT32 sigNum) {
+  sigintHandler = [pKvsWebrtcConfig](INT32 sigNum) {
     UNUSED_PARAM(sigNum);
 
     if (pKvsWebrtcConfig) {
@@ -28,25 +51,34 @@ VOID setSigintHandler(PKvsWebrtcConfig& pKvsWebrtcConfig)
   });
 }
 
-UINT32 setLogLevel()
+/**
+ * @brief CA証明書のパスを取得する
+ */
+STATUS getCaCertPath(PCHAR& pCaCertPath)
 {
-  PCHAR pLogLevel;
-  UINT32 logLevel;
+  auto retStatus = STATUS_SUCCESS;
 
-  if (!(pLogLevel = GETENV(DEBUG_LOG_LEVEL_ENV_VAR)) || STATUS_FAILED(STRTOUI32(pLogLevel, NULL, 10, &logLevel))) {
-    logLevel = LOG_LEVEL_WARN;
-  }
+  // CA証明書のパス
+  CHK_ERR(pCaCertPath = GETENV(CACERT_PATH_ENV_VAR), STATUS_INVALID_OPERATION, "環境変数「%s」は必須です。", CACERT_PATH_ENV_VAR);
 
-  SET_LOGGER_LOG_LEVEL(logLevel);
-  return logLevel;
+CleanUp:
+
+  return retStatus;
 }
 
-STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConfig& pKvsWebrtcConfig)
+// ============================================================================
+// KvsWebrtcConfig 管理
+// ============================================================================
+
+/**
+ * @brief KVS WebRTCの設定を作成する
+ */
+STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, std::unique_ptr<KvsWebrtcConfig>& pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
 
   // KVS WebRTCの設定を初期化
-  pKvsWebrtcConfig = new KvsWebrtcConfig;
+  pKvsWebrtcConfig = std::make_unique<KvsWebrtcConfig>();
 
   // 接続フラグ
   ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->isConnected, FALSE);
@@ -62,9 +94,6 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConf
 
   // 条件変数
   pKvsWebrtcConfig->cvar = CVAR_CREATE();
-
-  // ストリーミングセッションのマップ
-  pKvsWebrtcConfig->pStreamingSessions = new std::unordered_map<std::string, PKvsWebrtcStreamingSession>;
 
   // CA証明書のパスを取得
   CHK_STATUS(getCaCertPath(pKvsWebrtcConfig->pCaCertPath));
@@ -82,7 +111,7 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, PKvsWebrtcConf
                              pKvsWebrtcConfig->channelInfo));
 
   // コールバックを初期化
-  CHK_STATUS(initCallbacks(reinterpret_cast<UINT64>(pKvsWebrtcConfig), pKvsWebrtcConfig->callbacks));
+  CHK_STATUS(initCallbacks(reinterpret_cast<UINT64>(pKvsWebrtcConfig.get()), pKvsWebrtcConfig->callbacks));
 
   // シグナリングクライアントに関するメトリクス初期化
   CHK_STATUS(initMetrics(pKvsWebrtcConfig->metrics));
@@ -96,7 +125,10 @@ CleanUp:
   return retStatus;
 }
 
-STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig& pKvsWebrtcConfig)
+/**
+ * @brief KVS WebRTCの設定を解放する
+ */
+STATUS freeKvsWebrtcConfig(std::unique_ptr<KvsWebrtcConfig>& pKvsWebrtcConfig)
 {
   ENTERS();
   auto retStatus = STATUS_SUCCESS;
@@ -115,19 +147,18 @@ STATUS freeKvsWebrtcConfig(PKvsWebrtcConfig& pKvsWebrtcConfig)
   }
 
   // ストリーミングセッションを解放
-  for (auto&& value : *pKvsWebrtcConfig->pStreamingSessions) {
+  for (auto&& value : pKvsWebrtcConfig->streamingSessions) {
     freeKvsWebrtcStreamingSession(value.second);
   }
 
-  // ストリーミングセッションのマップを解放
-  delete pKvsWebrtcConfig->pStreamingSessions;
+  // ストリーミングセッションをクリア
+  pKvsWebrtcConfig->streamingSessions.clear();
 
   // 認証情報プロバイダーを解放
   freeIotCredentialProvider(&pKvsWebrtcConfig->pCredentialProvider);
 
   // KVS WebRTCの設定を解放
-  delete pKvsWebrtcConfig;
-  pKvsWebrtcConfig = nullptr;
+  pKvsWebrtcConfig.reset();
 
 CleanUp:
 
@@ -135,7 +166,14 @@ CleanUp:
   return retStatus;
 }
 
-STATUS createKvsWebrtcStreamingSession(PKvsWebrtcConfig& pKvsWebrtcConfig, PCHAR pPeerClientId, PKvsWebrtcStreamingSession& pStreamingSession)
+// ============================================================================
+// KvsWebrtcStreamingSession 管理
+// ============================================================================
+
+/**
+ * @brief ストリーミングセッションを作成する
+ */
+STATUS createKvsWebrtcStreamingSession(PKvsWebrtcConfig pKvsWebrtcConfig, PCHAR pPeerClientId, std::unique_ptr<KvsWebrtcStreamingSession>& pStreamingSession)
 {
   auto retStatus = STATUS_SUCCESS;
   RtcMediaStreamTrack videoTrack;
@@ -148,7 +186,7 @@ STATUS createKvsWebrtcStreamingSession(PKvsWebrtcConfig& pKvsWebrtcConfig, PCHAR
   MEMSET(&audioTrack, 0x00, SIZEOF(RtcMediaStreamTrack));
 
   // ストリーミングセッションを初期化
-  pStreamingSession = new KvsWebrtcStreamingSession;
+  pStreamingSession = std::make_unique<KvsWebrtcStreamingSession>();
 
   // KVS WebRTCの設定
   pStreamingSession->pKvsWebrtcConfig = pKvsWebrtcConfig;
@@ -164,12 +202,12 @@ STATUS createKvsWebrtcStreamingSession(PKvsWebrtcConfig& pKvsWebrtcConfig, PCHAR
 
   // ICE Candidateを受信した際のコールバックを設定
   CHK_STATUS(peerConnectionOnIceCandidate(pStreamingSession->pPeerConnection,
-                                          reinterpret_cast<UINT64>(pStreamingSession),
+                                          reinterpret_cast<UINT64>(pStreamingSession.get()),
                                           onIceCandidateHandler));
 
   // ピア接続の状態が変化した際のコールバックを設定
   CHK_STATUS(peerConnectionOnConnectionStateChange(pStreamingSession->pPeerConnection,
-                                                   reinterpret_cast<UINT64>(pStreamingSession),
+                                                   reinterpret_cast<UINT64>(pStreamingSession.get()),
                                                    onConnectionStateChanged));
 
   // サポートされるコーデックを追加
@@ -209,7 +247,10 @@ CleanUp:
   return retStatus;
 }
 
-STATUS freeKvsWebrtcStreamingSession(PKvsWebrtcStreamingSession& pStreamingSession)
+/**
+ * @brief ストリーミングセッションを解放する
+ */
+STATUS freeKvsWebrtcStreamingSession(std::unique_ptr<KvsWebrtcStreamingSession>& pStreamingSession)
 {
   auto retStatus = STATUS_SUCCESS;
 
@@ -221,8 +262,7 @@ STATUS freeKvsWebrtcStreamingSession(PKvsWebrtcStreamingSession& pStreamingSessi
   CHK_LOG_ERR(freePeerConnection(&pStreamingSession->pPeerConnection));
 
   // ストリーミングセッションを解放
-  delete pStreamingSession;
-  pStreamingSession = nullptr;
+  pStreamingSession.reset();
 
 CleanUp:
 
@@ -231,18 +271,13 @@ CleanUp:
   return retStatus;
 }
 
-STATUS getCaCertPath(PCHAR& pCaCertPath)
-{
-  auto retStatus = STATUS_SUCCESS;
+// ============================================================================
+// 初期化
+// ============================================================================
 
-  // CA証明書のパス
-  CHK_ERR(pCaCertPath = GETENV(CACERT_PATH_ENV_VAR), STATUS_INVALID_OPERATION, "環境変数「%s」は必須です。", CACERT_PATH_ENV_VAR);
-
-CleanUp:
-
-  return retStatus;
-}
-
+/**
+ * @brief 認証情報プロバイダーを作成する
+ */
 STATUS createCredentialProvider(PCHAR pCaCertPath, PAwsCredentialProvider& pCredentialProvider)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -271,6 +306,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief クライアント情報を初期化する
+ */
 STATUS initClientInfo(UINT32 logLevel, SignalingClientInfo& clientInfo)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -295,6 +333,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief チャネル情報を初期化する
+ */
 STATUS initChannelInfo(PCHAR pChannelName, PCHAR pCaCertPath, PCHAR pRegion, ChannelInfo& channelInfo)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -349,6 +390,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief コールバックを初期化する
+ */
 STATUS initCallbacks(UINT64 customData, SignalingClientCallbacks& callbacks)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -373,6 +417,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief メトリクスを初期化する
+ */
 STATUS initMetrics(SignalingClientMetrics& metrics)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -385,7 +432,10 @@ CleanUp:
   return retStatus;
 }
 
-STATUS initPeerConnection(PKvsWebrtcConfig& pKvsWebrtcConfig, PRtcPeerConnection& pPeerConnection)
+/**
+ * @brief ピア接続を初期化する
+ */
+STATUS initPeerConnection(PKvsWebrtcConfig pKvsWebrtcConfig, PRtcPeerConnection& pPeerConnection)
 {
   ENTERS();
   auto retStatus = STATUS_SUCCESS;
@@ -416,6 +466,13 @@ CleanUp:
   return retStatus;
 }
 
+// ============================================================================
+// シグナリング
+// ============================================================================
+
+/**
+ * @brief シグナリングクライアントを初期化する
+ */
 STATUS initSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -454,6 +511,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief シグナリングクライアントを解放する
+ */
 STATUS deinitSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -472,6 +532,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief シグナリングのメインループ
+ */
 STATUS loopSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   ENTERS();
@@ -485,14 +548,14 @@ STATUS loopSignaling(PKvsWebrtcConfig pKvsWebrtcConfig)
     isConfigObjLocked = TRUE;
 
     // 終了したストリーミングセッションを解放
-    for (auto&& value : *pKvsWebrtcConfig->pStreamingSessions) {
+    for (auto&& value : pKvsWebrtcConfig->streamingSessions) {
       if (ATOMIC_LOAD_BOOL(&value.second->isTerminated)) {
         CHK_STATUS(freeKvsWebrtcStreamingSession(value.second));
       }
     }
 
     // 解放したストリーミングセッションをマップから削除
-    std::erase_if(*pKvsWebrtcConfig->pStreamingSessions, [](auto&& value) {
+    std::erase_if(pKvsWebrtcConfig->streamingSessions, [](auto&& value) {
       return !value.second;
     });
 
@@ -516,6 +579,13 @@ CleanUp:
   return retStatus;
 }
 
+// ============================================================================
+// WebRTCセッション処理
+// ============================================================================
+
+/**
+ * @brief SDPオファーを処理する
+ */
 STATUS handleOffer(PKvsWebrtcConfig pKvsWebrtcConfig, PKvsWebrtcStreamingSession pStreamingSession, SignalingMessage& signalingMessage)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -548,6 +618,9 @@ CleanUp:
   return retStatus;
 }
 
+/**
+ * @brief SDPアンサーを送信する
+ */
 STATUS sendAnswer(PKvsWebrtcStreamingSession pStreamingSession)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -585,11 +658,38 @@ CleanUp:
   return retStatus;
 }
 
+// ============================================================================
+// コールバック
+// ============================================================================
+
+/**
+ * @brief シグナリングクライアントの状態が変化した際のコールバック
+ */
+STATUS onSignalingClientStateChanged(UINT64 customData, SIGNALING_CLIENT_STATE state)
+{
+  UNUSED_PARAM(customData);
+  auto retStatus = STATUS_SUCCESS;
+  PCHAR pStateStr;
+
+  // 状態を表す文字列を取得
+  CHK_STATUS(signalingClientGetStateString(state, &pStateStr));
+
+  // ログを出力
+  DLOGV("state: %d (%s)", state, pStateStr);
+
+CleanUp:
+
+  return retStatus;
+}
+
+/**
+ * @brief シグナリングメッセージを受信した際のコールバック
+ */
 STATUS onSignalingMessageReceived(UINT64 customData, PReceivedSignalingMessage pReceivedSignalingMessage)
 {
   auto retStatus = STATUS_SUCCESS;
   auto pKvsWebrtcConfig = reinterpret_cast<PKvsWebrtcConfig>(customData);
-  PKvsWebrtcStreamingSession pStreamingSession = nullptr;
+  std::unique_ptr<KvsWebrtcStreamingSession> pStreamingSession;
   auto isConfigObjLocked = FALSE;
   PCHAR pPeerClientId;
 
@@ -615,7 +715,7 @@ STATUS onSignalingMessageReceived(UINT64 customData, PReceivedSignalingMessage p
   switch (pReceivedSignalingMessage->signalingMessage.messageType) {
     case SIGNALING_MESSAGE_TYPE_OFFER:
       // ストリーミングセッションの存在チェック
-      CHK_ERR(!pKvsWebrtcConfig->pStreamingSessions->contains(pPeerClientId),
+      CHK_ERR(!pKvsWebrtcConfig->streamingSessions.contains(pPeerClientId),
               STATUS_INVALID_OPERATION,
               "すでにクライアントID「%s」のピア接続は存在します。",
               pPeerClientId);
@@ -624,10 +724,10 @@ STATUS onSignalingMessageReceived(UINT64 customData, PReceivedSignalingMessage p
       CHK_STATUS(createKvsWebrtcStreamingSession(pKvsWebrtcConfig, pPeerClientId, pStreamingSession));
 
       // SDPオファーを処理
-      CHK_STATUS(handleOffer(pKvsWebrtcConfig, pStreamingSession, pReceivedSignalingMessage->signalingMessage));
+      CHK_STATUS(handleOffer(pKvsWebrtcConfig, pStreamingSession.get(), pReceivedSignalingMessage->signalingMessage));
 
       // ストリーミングセッションを保存
-      pKvsWebrtcConfig->pStreamingSessions->emplace(pPeerClientId, pStreamingSession);
+      pKvsWebrtcConfig->streamingSessions.emplace(pPeerClientId, std::move(pStreamingSession));
       break;
   }
 
@@ -646,36 +746,9 @@ CleanUp:
   return retStatus;
 }
 
-STATUS onSignalingClientStateChanged(UINT64 customData, SIGNALING_CLIENT_STATE state)
-{
-  UNUSED_PARAM(customData);
-  auto retStatus = STATUS_SUCCESS;
-  PCHAR pStateStr;
-
-  // 状態を表す文字列を取得
-  CHK_STATUS(signalingClientGetStateString(state, &pStateStr));
-
-  // ログを出力
-  DLOGV("state: %d (%s)", state, pStateStr);
-
-CleanUp:
-
-  return retStatus;
-}
-
-STATUS onSignalingClientError(UINT64 customData, STATUS status, PCHAR message, UINT32 messageLen)
-{
-  UNUSED_PARAM(customData);
-  auto retStatus = STATUS_SUCCESS;
-
-  // ログを出力
-  DLOGW("status: 0x%08x, message: %s, messageLen: %d", status, message, messageLen);
-
-CleanUp:
-
-  return retStatus;
-}
-
+/**
+ * @brief ICE Candidateを受信した際のコールバック
+ */
 VOID onIceCandidateHandler(UINT64 customData, PCHAR candidateJson)
 {
   UNUSED_PARAM(customData);
@@ -689,6 +762,9 @@ CleanUp:
   CHK_LOG_ERR(retStatus);
 }
 
+/**
+ * @brief ピア接続の状態が変化した際のコールバック
+ */
 VOID onConnectionStateChanged(UINT64 customData, RTC_PEER_CONNECTION_STATE state)
 {
   auto retStatus = STATUS_SUCCESS;
@@ -733,4 +809,20 @@ VOID onConnectionStateChanged(UINT64 customData, RTC_PEER_CONNECTION_STATE state
 CleanUp:
 
   CHK_LOG_ERR(retStatus);
+}
+
+/**
+ * @brief シグナリングクライアントでエラーが発生した際のコールバック
+ */
+STATUS onSignalingClientError(UINT64 customData, STATUS status, PCHAR message, UINT32 messageLen)
+{
+  UNUSED_PARAM(customData);
+  auto retStatus = STATUS_SUCCESS;
+
+  // ログを出力
+  DLOGW("status: 0x%08x, message: %s, messageLen: %d", status, message, messageLen);
+
+CleanUp:
+
+  return retStatus;
 }

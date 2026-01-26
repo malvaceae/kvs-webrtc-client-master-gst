@@ -1,20 +1,15 @@
-#include "kvs.hpp"
-#include <gst/gst.h>
-#include <gst/app/gstappsink.h>
+#include "common.hpp"
 
 INT32 main(INT32 argc, CHAR* argv[])
 {
   auto retStatus = STATUS_SUCCESS;
-  PKvsWebrtcConfig pKvsWebrtcConfig = nullptr;
+  std::unique_ptr<KvsWebrtcConfig> pKvsWebrtcConfig;
   PCHAR pChannelName;
 
   SET_INSTRUMENTED_ALLOCATORS();
 
   // ログレベル
   auto logLevel = setLogLevel();
-
-  // SIGINTハンドラを設定
-  setSigintHandler(pKvsWebrtcConfig);
 
   // チャネル名
   CHK_ERR(argc > 1, STATUS_INVALID_OPERATION, "チャネル名は必須です。");
@@ -26,14 +21,17 @@ INT32 main(INT32 argc, CHAR* argv[])
   // KVS WebRTCの設定を作成
   CHK_STATUS(createKvsWebrtcConfig(pChannelName, logLevel, pKvsWebrtcConfig));
 
+  // SIGINTハンドラを設定
+  setSigintHandler(pKvsWebrtcConfig.get());
+
   // KVS WebRTCを初期化
   CHK_STATUS(initKvsWebRtc());
 
   // シグナリングクライアントを初期化
-  CHK_STATUS(initSignaling(pKvsWebrtcConfig));
+  CHK_STATUS(initSignaling(pKvsWebrtcConfig.get()));
 
   // メインループ
-  CHK_STATUS(loopSignaling(pKvsWebrtcConfig));
+  CHK_STATUS(loopSignaling(pKvsWebrtcConfig.get()));
 
 CleanUp:
 
@@ -42,7 +40,7 @@ CleanUp:
   }
 
   // シグナリングクライアントを解放
-  deinitSignaling(pKvsWebrtcConfig);
+  deinitSignaling(pKvsWebrtcConfig.get());
 
   // KVS WebRTCを終了
   deinitKvsWebRtc();
