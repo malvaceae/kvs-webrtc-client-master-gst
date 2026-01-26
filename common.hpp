@@ -70,11 +70,17 @@ struct KvsWebrtcConfig {
 
   // シグナリングクライアント
   SIGNALING_CLIENT_HANDLE signalingHandle;
+
+  // 設定されたICEサーバーの数
+  UINT32 iceUriCount;
 };
 
 struct KvsWebrtcStreamingSession {
   // 終了フラグ
   volatile ATOMIC_BOOL isTerminated;
+
+  // ICE候補収集完了フラグ
+  volatile ATOMIC_BOOL candidateGatheringDone;
 
   // KVS WebRTCの設定
   PKvsWebrtcConfig pKvsWebrtcConfig;
@@ -91,6 +97,9 @@ struct KvsWebrtcStreamingSession {
 
   // SDPアンサー
   RtcSessionDescriptionInit answerSessionDescriptionInit;
+
+  // リモートがTrickle ICEをサポートしているか
+  BOOL remoteCanTrickleIce;
 };
 
 // ============================================================================
@@ -206,6 +215,16 @@ STATUS handleOffer(PKvsWebrtcConfig, PKvsWebrtcStreamingSession, SignalingMessag
  * @brief SDPアンサーを送信する
  */
 STATUS sendAnswer(PKvsWebrtcStreamingSession);
+
+/**
+ * @brief ICE候補を送信する
+ */
+STATUS sendIceCandidate(PKvsWebrtcStreamingSession, PCHAR);
+
+/**
+ * @brief リモートからのICE候補を処理する
+ */
+STATUS handleRemoteCandidate(PKvsWebrtcStreamingSession, SignalingMessage&);
 
 // ============================================================================
 // コールバック

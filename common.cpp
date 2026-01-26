@@ -95,6 +95,9 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, std::unique_pt
   // 条件変数
   pKvsWebrtcConfig->cvar = CVAR_CREATE();
 
+  // ICEサーバーの数
+  pKvsWebrtcConfig->iceUriCount = 0;
+
   // CA証明書のパスを取得
   CHK_STATUS(getCaCertPath(pKvsWebrtcConfig->pCaCertPath));
 
@@ -196,6 +199,12 @@ STATUS createKvsWebrtcStreamingSession(PKvsWebrtcConfig pKvsWebrtcConfig, PCHAR 
 
   // 終了フラグ
   ATOMIC_STORE_BOOL(&pStreamingSession->isTerminated, FALSE);
+
+  // ICE候補収集完了フラグ
+  ATOMIC_STORE_BOOL(&pStreamingSession->candidateGatheringDone, FALSE);
+
+  // Trickle ICEフラグ (handleOfferで設定される)
+  pStreamingSession->remoteCanTrickleIce = FALSE;
 
   // ピア接続を初期化
   CHK_STATUS(initPeerConnection(pKvsWebrtcConfig, pStreamingSession->pPeerConnection));
@@ -440,6 +449,8 @@ STATUS initPeerConnection(PKvsWebrtcConfig pKvsWebrtcConfig, PRtcPeerConnection&
   ENTERS();
   auto retStatus = STATUS_SUCCESS;
   RtcConfiguration configuration;
+  UINT32 i, j, iceConfigCount, uriCount = 0;
+  PIceConfigInfo pIceConfigInfo;
 
   // ピア接続の設定を初期化
   MEMSET(&configuration, 0x00, SIZEOF(RtcConfiguration));
@@ -456,6 +467,29 @@ STATUS initPeerConnection(PKvsWebrtcConfig pKvsWebrtcConfig, PRtcPeerConnection&
            KINESIS_VIDEO_STUN_URL,
            pKvsWebrtcConfig->channelInfo.pRegion,
            KINESIS_VIDEO_STUN_URL_POSTFIX);
+
+  // TURNサーバーの設定
+  CHK_STATUS(signalingClientGetIceConfigInfoCount(pKvsWebrtcConfig->signalingHandle, &iceConfigCount));
+
+  // TURNサーバーを1つだけ使用 (候補収集の遅延を最適化)
+  for (uriCount = 0, i = 0; i < 1 && i < iceConfigCount; i++) {
+    CHK_STATUS(signalingClientGetIceConfigInfo(pKvsWebrtcConfig->signalingHandle, i, &pIceConfigInfo));
+
+    for (j = 0; j < pIceConfigInfo->uriCount; j++) {
+      CHECK(uriCount < MAX_ICE_SERVERS_COUNT);
+
+      DLOGD("TURN server %d urls: %s", j + 1, pIceConfigInfo->uris[j]);
+
+      STRNCPY(configuration.iceServers[uriCount + 1].urls, pIceConfigInfo->uris[j], MAX_ICE_CONFIG_URI_LEN);
+      STRNCPY(configuration.iceServers[uriCount + 1].credential, pIceConfigInfo->password, MAX_ICE_CONFIG_CREDENTIAL_LEN);
+      STRNCPY(configuration.iceServers[uriCount + 1].username, pIceConfigInfo->userName, MAX_ICE_CONFIG_USER_NAME_LEN);
+
+      uriCount++;
+    }
+  }
+
+  // ICEサーバーの数を保存
+  pKvsWebrtcConfig->iceUriCount = uriCount + 1;
 
   // ピア接続を作成
   CHK_STATUS(createPeerConnection(&configuration, &pPeerConnection));
@@ -588,8 +622,10 @@ CleanUp:
  */
 STATUS handleOffer(PKvsWebrtcConfig pKvsWebrtcConfig, PKvsWebrtcStreamingSession pStreamingSession, SignalingMessage& signalingMessage)
 {
+  UNUSED_PARAM(pKvsWebrtcConfig);
   auto retStatus = STATUS_SUCCESS;
   RtcSessionDescriptionInit sessionDescriptionInit;
+  NullableBool canTrickle;
 
   // セッション情報を初期化
   MEMSET(&sessionDescriptionInit, 0x00, SIZEOF(RtcSessionDescriptionInit));
@@ -602,14 +638,25 @@ STATUS handleOffer(PKvsWebrtcConfig pKvsWebrtcConfig, PKvsWebrtcStreamingSession
   // リモートのピア接続を設定
   CHK_STATUS(setRemoteDescription(pStreamingSession->pPeerConnection, &sessionDescriptionInit));
 
+  // リモートがTrickle ICEをサポートしているか確認
+  canTrickle = canTrickleIceCandidates(pStreamingSession->pPeerConnection);
+
+  // setRemoteDescription後はNULLにならない
+  CHECK(!NULLABLE_CHECK_EMPTY(canTrickle));
+  pStreamingSession->remoteCanTrickleIce = canTrickle.value;
+
   // ローカルのピア接続を設定
   CHK_STATUS(setLocalDescription(pStreamingSession->pPeerConnection, &pStreamingSession->answerSessionDescriptionInit));
 
-  // SDPアンサーを作成
-  CHK_STATUS(createAnswer(pStreamingSession->pPeerConnection, &pStreamingSession->answerSessionDescriptionInit));
+  // Trickle ICEをサポートしている場合は即座にアンサーを送信
+  // サポートしていない場合はICE候補収集完了後に送信 (onIceCandidateHandlerで処理)
+  if (pStreamingSession->remoteCanTrickleIce) {
+    // SDPアンサーを作成
+    CHK_STATUS(createAnswer(pStreamingSession->pPeerConnection, &pStreamingSession->answerSessionDescriptionInit));
 
-  // SDPアンサーを送信
-  CHK_STATUS(sendAnswer(pStreamingSession));
+    // SDPアンサーを送信
+    CHK_STATUS(sendAnswer(pStreamingSession));
+  }
 
 CleanUp:
 
@@ -650,6 +697,68 @@ STATUS sendAnswer(PKvsWebrtcStreamingSession pStreamingSession)
 
   // シグナリングメッセージを送信
   CHK_STATUS(signalingClientSendMessageSync(pKvsWebrtcConfig->signalingHandle, &signalingMessage));
+
+CleanUp:
+
+  CHK_LOG_ERR(retStatus);
+
+  return retStatus;
+}
+
+/**
+ * @brief ICE候補を送信する
+ */
+STATUS sendIceCandidate(PKvsWebrtcStreamingSession pStreamingSession, PCHAR candidateJson)
+{
+  auto retStatus = STATUS_SUCCESS;
+  auto pKvsWebrtcConfig = pStreamingSession->pKvsWebrtcConfig;
+  SignalingMessage signalingMessage;
+
+  // NULLチェック
+  CHK(pStreamingSession && candidateJson, STATUS_NULL_ARG);
+
+  // シグナリングメッセージのバージョン
+  signalingMessage.version = SIGNALING_MESSAGE_CURRENT_VERSION;
+
+  // シグナリングメッセージのタイプ
+  signalingMessage.messageType = SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE;
+
+  // クライアントID
+  STRNCPY(signalingMessage.peerClientId, pStreamingSession->peerClientId, MAX_SIGNALING_CLIENT_ID_LEN);
+
+  // ペイロード
+  signalingMessage.payloadLen = (UINT32) STRNLEN(candidateJson, MAX_SIGNALING_MESSAGE_LEN);
+  STRNCPY(signalingMessage.payload, candidateJson, signalingMessage.payloadLen);
+
+  // 関連付けID
+  signalingMessage.correlationId[0] = '\0';
+
+  // シグナリングメッセージを送信
+  CHK_STATUS(signalingClientSendMessageSync(pKvsWebrtcConfig->signalingHandle, &signalingMessage));
+
+CleanUp:
+
+  CHK_LOG_ERR(retStatus);
+
+  return retStatus;
+}
+
+/**
+ * @brief リモートからのICE候補を処理する
+ */
+STATUS handleRemoteCandidate(PKvsWebrtcStreamingSession pStreamingSession, SignalingMessage& signalingMessage)
+{
+  auto retStatus = STATUS_SUCCESS;
+  RtcIceCandidateInit iceCandidate;
+
+  // NULLチェック
+  CHK(pStreamingSession, STATUS_NULL_ARG);
+
+  // ICE候補をデシリアライズ
+  CHK_STATUS(deserializeRtcIceCandidateInit(signalingMessage.payload, signalingMessage.payloadLen, &iceCandidate));
+
+  // ICE候補を追加
+  CHK_STATUS(addIceCandidate(pStreamingSession->pPeerConnection, iceCandidate.candidate));
 
 CleanUp:
 
@@ -729,6 +838,19 @@ STATUS onSignalingMessageReceived(UINT64 customData, PReceivedSignalingMessage p
       // ストリーミングセッションを保存
       pKvsWebrtcConfig->streamingSessions.emplace(pPeerClientId, std::move(pStreamingSession));
       break;
+    case SIGNALING_MESSAGE_TYPE_ICE_CANDIDATE:
+      // ストリーミングセッションの存在チェック
+      CHK_ERR(pKvsWebrtcConfig->streamingSessions.contains(pPeerClientId),
+              STATUS_INVALID_OPERATION,
+              "クライアントID「%s」のピア接続が見つかりません。",
+              pPeerClientId);
+
+      // リモートからのICE候補を処理
+      CHK_STATUS(handleRemoteCandidate(pKvsWebrtcConfig->streamingSessions[pPeerClientId].get(),
+                                       pReceivedSignalingMessage->signalingMessage));
+      break;
+    default:
+      break;
   }
 
   // ロックを解除
@@ -751,11 +873,31 @@ CleanUp:
  */
 VOID onIceCandidateHandler(UINT64 customData, PCHAR candidateJson)
 {
-  UNUSED_PARAM(customData);
   auto retStatus = STATUS_SUCCESS;
+  auto pStreamingSession = reinterpret_cast<PKvsWebrtcStreamingSession>(customData);
 
-  // ログを出力
-  DLOGI("candidate: %s", candidateJson);
+  // NULLチェック
+  CHK(pStreamingSession, STATUS_NULL_ARG);
+
+  if (candidateJson == NULL) {
+    // ログを出力
+    DLOGD("ICE candidate gathering done");
+
+    // ICE候補収集完了
+    ATOMIC_STORE_BOOL(&pStreamingSession->candidateGatheringDone, TRUE);
+
+    // Trickle ICEをサポートしていない場合はここでアンサーを送信
+    if (!pStreamingSession->remoteCanTrickleIce) {
+      CHK_STATUS(createAnswer(pStreamingSession->pPeerConnection, &pStreamingSession->answerSessionDescriptionInit));
+      CHK_STATUS(sendAnswer(pStreamingSession));
+    }
+  } else if (pStreamingSession->remoteCanTrickleIce) {
+    // ログを出力
+    DLOGV("candidate: %s", candidateJson);
+
+    // Trickle ICEをサポートしている場合はICE候補を送信
+    CHK_STATUS(sendIceCandidate(pStreamingSession, candidateJson));
+  }
 
 CleanUp:
 
