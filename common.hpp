@@ -80,8 +80,11 @@ struct KvsWebrtcConfig {
   // 設定されたICEサーバーの数
   UINT32 iceUriCount;
 
-  // 送信用パイプライン
-  GstElement* senderPipeline;
+  // 送信用パイプライン (カメラ/マイク → rtpbin → UDP送信)
+  GstElement* sendPipeline;
+
+  // 受信用パイプライン (UDP受信 → rtpbin → appsink)
+  GstElement* recvPipeline;
 };
 
 struct KvsWebrtcStreamingSession {
@@ -282,8 +285,18 @@ STATUS createSenderPipeline(PKvsWebrtcConfig);
 STATUS freeSenderPipeline(PKvsWebrtcConfig);
 
 /**
- * @brief 新しいサンプルを受信した際のコールバック
+ * @brief 新しいサンプルを受信した際の共通処理
  */
-GstFlowReturn onNewSample(GstElement*, gpointer);
+GstFlowReturn onNewSample(GstElement*, gpointer, UINT64);
+
+/**
+ * @brief Videoサンプルを受信した際のコールバック
+ */
+GstFlowReturn onNewSampleVideo(GstElement*, gpointer);
+
+/**
+ * @brief Audioサンプルを受信した際のコールバック
+ */
+GstFlowReturn onNewSampleAudio(GstElement*, gpointer);
 
 #endif

@@ -105,7 +105,10 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, std::unique_pt
   pKvsWebrtcConfig->iceUriCount = 0;
 
   // 送信用パイプライン
-  pKvsWebrtcConfig->senderPipeline = nullptr;
+  pKvsWebrtcConfig->sendPipeline = nullptr;
+
+  // 受信用パイプライン
+  pKvsWebrtcConfig->recvPipeline = nullptr;
 
   // CA証明書のパスを取得
   CHK_STATUS(getCaCertPath(pKvsWebrtcConfig->pCaCertPath));
@@ -1042,17 +1045,20 @@ STATUS createSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
   GError* error = nullptr;
-  GstElement* appsink = nullptr;
+  GstElement* appsinkVideo = nullptr;
+  GstElement* appsinkAudio = nullptr;
 
   // NULLチェック
   CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
 
-  // パイプラインを作成 (teeでWebRTCとローカルRTPに分岐)
-  pKvsWebrtcConfig->senderPipeline = gst_parse_launch(
+  // 送信用パイプラインを作成 (カメラ/マイク → rtpbin → UDP送信)
+  pKvsWebrtcConfig->sendPipeline = gst_parse_launch(
+    "rtpbin name=rtpbin "
+    // Video
     "videotestsrc is-live=true ! "
     "video/x-raw,width=640,height=480,framerate=30/1 ! "
     "queue "
-    "  max-size-buffers=1 "
+    "  max-size-buffers=200 "
     "  leaky=downstream ! "
     "clockoverlay "
     "  time-format=\"%Y-%m-%d %H:%M:%S\" "
@@ -1067,46 +1073,115 @@ STATUS createSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
     "  key-int-max=30 ! "
     "h264parse config-interval=-1 ! "
     "video/x-h264,profile=baseline,stream-format=byte-stream,alignment=au ! "
-    "tee name=t "
-    "t. ! "
-    "  queue "
-    "    max-size-buffers=1 "
-    "    leaky=downstream ! "
-    "  appsink "
-    "    name=appsink "
-    "    emit-signals=true "
-    "    max-buffers=1 "
-    "    drop=true "
-    "    sync=false "
-    "t. ! "
-    "  queue "
-    "    max-size-buffers=1 "
-    "    leaky=downstream ! "
-    "  rtph264pay ! "
-    "  udpsink "
-    "    host=127.0.0.1 "
-    "    port=50000 "
-    "    sync=false",
+    "rtph264pay ! "
+    "rtpbin.send_rtp_sink_0 "
+    "rtpbin.send_rtp_src_0 ! "
+    "udpsink "
+    "  host=127.0.0.1 "
+    "  port=50000 "
+    "  async=false "
+    "  sync=true "
+    "rtpbin.send_rtcp_src_0 ! "
+    "udpsink "
+    "  host=127.0.0.1 "
+    "  port=50001 "
+    "  async=false "
+    "  sync=false "
+    // Audio
+    "audiotestsrc is-live=true ! "
+    "queue "
+    "  max-size-buffers=400 "
+    "  leaky=downstream ! "
+    "audioconvert ! "
+    "audioresample ! "
+    "opusenc ! "
+    "rtpopuspay ! "
+    "rtpbin.send_rtp_sink_1 "
+    "rtpbin.send_rtp_src_1 ! "
+    "udpsink "
+    "  host=127.0.0.1 "
+    "  port=50002 "
+    "  async=false "
+    "  sync=true "
+    "rtpbin.send_rtcp_src_1 ! "
+    "udpsink "
+    "  host=127.0.0.1 "
+    "  port=50003 "
+    "  async=false "
+    "  sync=false",
     &error);
 
   // エラーチェック
   if (error) {
-    DLOGE("Failed to create pipeline: %s", error->message);
+    DLOGE("Failed to create sender pipeline: %s", error->message);
     g_error_free(error);
     CHK(FALSE, STATUS_INTERNAL_ERROR);
   }
 
-  // appsinkを取得
-  CHK(appsink = gst_bin_get_by_name(GST_BIN(pKvsWebrtcConfig->senderPipeline), "appsink"), STATUS_INTERNAL_ERROR);
+  // 受信用パイプラインを作成 (UDP受信 → rtpbin → appsink)
+  error = nullptr;
+  pKvsWebrtcConfig->recvPipeline = gst_parse_launch(
+    "rtpbin name=rtpbin "
+    // Video受信
+    "udpsrc "
+    "  port=50000 "
+    "  caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
+    "rtpbin.recv_rtp_sink_0 "
+    "udpsrc "
+    "  port=50001 "
+    "  caps=\"application/x-rtcp\" ! "
+    "rtpbin.recv_rtcp_sink_0 "
+    // Audio受信
+    "udpsrc "
+    "  port=50002 "
+    "  caps=\"application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS\" ! "
+    "rtpbin.recv_rtp_sink_1 "
+    "udpsrc "
+    "  port=50003 "
+    "  caps=\"application/x-rtcp\" ! "
+    "rtpbin.recv_rtcp_sink_1 "
+    // Video出力
+    "rtpbin. ! "
+    "rtph264depay ! "
+    "queue ! "
+    "h264parse ! "
+    "video/x-h264,stream-format=byte-stream,alignment=au ! "
+    "appsink "
+    "  name=appsink-video "
+    "  emit-signals=true "
+    "  async=false "
+    "  sync=true "
+    // Audio出力
+    "rtpbin. ! "
+    "rtpopusdepay ! "
+    "queue ! "
+    "appsink "
+    "  name=appsink-audio "
+    "  emit-signals=true "
+    "  async=false "
+    "  sync=true",
+    &error);
 
-  // appsinkのシグナルを接続
-  g_signal_connect(appsink, "new-sample", G_CALLBACK(onNewSample), pKvsWebrtcConfig);
+  // エラーチェック
+  if (error) {
+    DLOGE("Failed to create receiver pipeline: %s", error->message);
+    g_error_free(error);
+    CHK(FALSE, STATUS_INTERNAL_ERROR);
+  }
 
-  // appsinkの参照を解放
-  gst_object_unref(appsink);
+  // Video appsinkを取得してシグナルを接続
+  CHK(appsinkVideo = gst_bin_get_by_name(GST_BIN(pKvsWebrtcConfig->recvPipeline), "appsink-video"), STATUS_INTERNAL_ERROR);
+  g_signal_connect(appsinkVideo, "new-sample", G_CALLBACK(onNewSampleVideo), pKvsWebrtcConfig);
+  gst_object_unref(appsinkVideo);
+
+  // Audio appsinkを取得してシグナルを接続
+  CHK(appsinkAudio = gst_bin_get_by_name(GST_BIN(pKvsWebrtcConfig->recvPipeline), "appsink-audio"), STATUS_INTERNAL_ERROR);
+  g_signal_connect(appsinkAudio, "new-sample", G_CALLBACK(onNewSampleAudio), pKvsWebrtcConfig);
+  gst_object_unref(appsinkAudio);
 
   // パイプラインを開始
-  gst_element_set_state(pKvsWebrtcConfig->senderPipeline, GST_STATE_PLAYING);
+  gst_element_set_state(pKvsWebrtcConfig->sendPipeline, GST_STATE_PLAYING);
+  gst_element_set_state(pKvsWebrtcConfig->recvPipeline, GST_STATE_PLAYING);
 
 CleanUp:
 
@@ -1128,14 +1203,18 @@ STATUS freeSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
   // NULLチェック
   CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
 
-  // パイプラインを解放
-  if (pKvsWebrtcConfig->senderPipeline) {
-    // パイプラインを停止
-    gst_element_set_state(pKvsWebrtcConfig->senderPipeline, GST_STATE_NULL);
+  // 送信用パイプラインを解放
+  if (pKvsWebrtcConfig->sendPipeline) {
+    gst_element_set_state(pKvsWebrtcConfig->sendPipeline, GST_STATE_NULL);
+    gst_object_unref(pKvsWebrtcConfig->sendPipeline);
+    pKvsWebrtcConfig->sendPipeline = nullptr;
+  }
 
-    // パイプラインの参照を解放
-    gst_object_unref(pKvsWebrtcConfig->senderPipeline);
-    pKvsWebrtcConfig->senderPipeline = nullptr;
+  // 受信用パイプラインを解放
+  if (pKvsWebrtcConfig->recvPipeline) {
+    gst_element_set_state(pKvsWebrtcConfig->recvPipeline, GST_STATE_NULL);
+    gst_object_unref(pKvsWebrtcConfig->recvPipeline);
+    pKvsWebrtcConfig->recvPipeline = nullptr;
   }
 
 CleanUp:
@@ -1144,9 +1223,9 @@ CleanUp:
 }
 
 /**
- * @brief 新しいサンプルを受信した際のコールバック
+ * @brief 新しいサンプルを受信した際の共通処理
  */
-GstFlowReturn onNewSample(GstElement* sink, gpointer data)
+GstFlowReturn onNewSample(GstElement* sink, gpointer data, UINT64 trackId)
 {
   auto retStatus = STATUS_SUCCESS;
   auto ret = GST_FLOW_OK;
@@ -1158,6 +1237,7 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data)
   GstMapInfo info;
   Frame frame;
   BOOL isDroppable, isDelta;
+  PRtcRtpTransceiver pRtcRtpTransceiver = nullptr;
 
   // NULLチェック
   CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
@@ -1205,7 +1285,7 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data)
 
   // フレームを初期化
   MEMSET(&frame, 0, SIZEOF(Frame));
-  frame.trackId = DEFAULT_VIDEO_TRACK_ID;
+  frame.trackId = trackId;
   frame.duration = 0;
   frame.version = FRAME_CURRENT_VERSION;
   frame.size = static_cast<UINT32>(info.size);
@@ -1224,8 +1304,13 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data)
       // フレームインデックスを設定
       frame.index = static_cast<UINT32>(ATOMIC_INCREMENT(&value.second->frameIndex));
 
+      // トランシーバーを選択
+      pRtcRtpTransceiver = (trackId == DEFAULT_AUDIO_TRACK_ID)
+        ? value.second->pAudioRtcRtpTransceiver
+        : value.second->pVideoRtcRtpTransceiver;
+
       // フレームを送信
-      auto status = writeFrame(value.second->pVideoRtcRtpTransceiver, &frame);
+      auto status = writeFrame(pRtcRtpTransceiver, &frame);
       if (STATUS_FAILED(status) && status != STATUS_SRTP_NOT_READY_YET) {
         DLOGV("writeFrame failed: 0x%08x", status);
       }
@@ -1253,4 +1338,20 @@ CleanUp:
   }
 
   return ret;
+}
+
+/**
+ * @brief Videoサンプルを受信した際のコールバック
+ */
+GstFlowReturn onNewSampleVideo(GstElement* sink, gpointer data)
+{
+  return onNewSample(sink, data, DEFAULT_VIDEO_TRACK_ID);
+}
+
+/**
+ * @brief Audioサンプルを受信した際のコールバック
+ */
+GstFlowReturn onNewSampleAudio(GstElement* sink, gpointer data)
+{
+  return onNewSample(sink, data, DEFAULT_AUDIO_TRACK_ID);
 }
