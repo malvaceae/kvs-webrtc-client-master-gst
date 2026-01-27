@@ -104,6 +104,9 @@ STATUS createKvsWebrtcConfig(PCHAR pChannelName, UINT32 logLevel, std::unique_pt
   // ICEサーバーの数
   pKvsWebrtcConfig->iceUriCount = 0;
 
+  // 送信用パイプライン
+  pKvsWebrtcConfig->senderPipeline = nullptr;
+
   // CA証明書のパスを取得
   CHK_STATUS(getCaCertPath(pKvsWebrtcConfig->pCaCertPath));
 
@@ -159,6 +162,9 @@ STATUS freeKvsWebrtcConfig(std::unique_ptr<KvsWebrtcConfig>& pKvsWebrtcConfig)
   if (IS_VALID_CVAR_VALUE(pKvsWebrtcConfig->cvar)) {
     CVAR_FREE(pKvsWebrtcConfig->cvar);
   }
+
+  // 送信用パイプラインを解放
+  freeSenderPipeline(pKvsWebrtcConfig.get());
 
   // ストリーミングセッションを解放
   for (auto&& value : pKvsWebrtcConfig->streamingSessions) {
@@ -216,6 +222,9 @@ STATUS createKvsWebrtcStreamingSession(PKvsWebrtcConfig pKvsWebrtcConfig, PCHAR 
 
   // Trickle ICEフラグ (handleOfferで設定される)
   pStreamingSession->remoteCanTrickleIce = FALSE;
+
+  // フレームインデックス
+  pStreamingSession->frameIndex = 0;
 
   // ピア接続を初期化
   CHK_STATUS(initPeerConnection(pKvsWebrtcConfig, pStreamingSession->pPeerConnection));
@@ -764,7 +773,7 @@ STATUS sendIceCandidate(PKvsWebrtcStreamingSession pStreamingSession, PCHAR cand
   STRNCPY(signalingMessage.peerClientId, pStreamingSession->peerClientId, MAX_SIGNALING_CLIENT_ID_LEN);
 
   // ペイロード
-  signalingMessage.payloadLen = (UINT32) STRNLEN(candidateJson, MAX_SIGNALING_MESSAGE_LEN);
+  signalingMessage.payloadLen = static_cast<UINT32>(STRNLEN(candidateJson, MAX_SIGNALING_MESSAGE_LEN));
   STRNCPY(signalingMessage.payload, candidateJson, signalingMessage.payloadLen);
 
   // 関連付けID
@@ -1011,10 +1020,8 @@ STATUS onSignalingClientError(UINT64 customData, STATUS status, PCHAR message, U
   DLOGW("status: 0x%08x, message: %s, messageLen: %d", status, message, messageLen);
 
   // 特定のエラーの場合はシグナリングクライアントを再作成
-  if (
-    status == STATUS_SIGNALING_ICE_CONFIG_REFRESH_FAILED ||
-    status == STATUS_SIGNALING_RECONNECT_FAILED
-  ) {
+  if (status == STATUS_SIGNALING_ICE_CONFIG_REFRESH_FAILED ||
+      status == STATUS_SIGNALING_RECONNECT_FAILED) {
     ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->recreateSignalingClient, TRUE);
     CVAR_BROADCAST(pKvsWebrtcConfig->cvar);
   }
@@ -1022,4 +1029,228 @@ STATUS onSignalingClientError(UINT64 customData, STATUS status, PCHAR message, U
 CleanUp:
 
   return retStatus;
+}
+
+// ============================================================================
+// GStreamer
+// ============================================================================
+
+/**
+ * @brief 送信用パイプラインを作成する
+ */
+STATUS createSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
+{
+  auto retStatus = STATUS_SUCCESS;
+  GError* error = nullptr;
+  GstElement* appsink = nullptr;
+
+  // NULLチェック
+  CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
+
+  // パイプラインを作成 (teeでWebRTCとローカルRTPに分岐)
+  pKvsWebrtcConfig->senderPipeline = gst_parse_launch(
+    "videotestsrc is-live=true ! "
+    "video/x-raw,width=640,height=480,framerate=30/1 ! "
+    "queue "
+    "  max-size-buffers=1 "
+    "  leaky=downstream ! "
+    "clockoverlay "
+    "  time-format=\"%Y-%m-%d %H:%M:%S\" "
+    "  halignment=right "
+    "  valignment=top ! "
+    "videoconvert ! "
+    "x264enc "
+    "  tune=zerolatency "
+    "  speed-preset=ultrafast "
+    "  bitrate=512 "
+    "  bframes=0 "
+    "  key-int-max=30 ! "
+    "h264parse config-interval=-1 ! "
+    "video/x-h264,profile=baseline,stream-format=byte-stream,alignment=au ! "
+    "tee name=t "
+    "t. ! "
+    "  queue "
+    "    max-size-buffers=1 "
+    "    leaky=downstream ! "
+    "  appsink "
+    "    name=appsink "
+    "    emit-signals=true "
+    "    max-buffers=1 "
+    "    drop=true "
+    "    sync=false "
+    "t. ! "
+    "  queue "
+    "    max-size-buffers=1 "
+    "    leaky=downstream ! "
+    "  rtph264pay ! "
+    "  udpsink "
+    "    host=127.0.0.1 "
+    "    port=50000 "
+    "    sync=false",
+    &error);
+
+  // エラーチェック
+  if (error) {
+    DLOGE("Failed to create pipeline: %s", error->message);
+    g_error_free(error);
+    CHK(FALSE, STATUS_INTERNAL_ERROR);
+  }
+
+  // appsinkを取得
+  CHK(appsink = gst_bin_get_by_name(GST_BIN(pKvsWebrtcConfig->senderPipeline), "appsink"), STATUS_INTERNAL_ERROR);
+
+  // appsinkのシグナルを接続
+  g_signal_connect(appsink, "new-sample", G_CALLBACK(onNewSample), pKvsWebrtcConfig);
+
+  // appsinkの参照を解放
+  gst_object_unref(appsink);
+
+  // パイプラインを開始
+  gst_element_set_state(pKvsWebrtcConfig->senderPipeline, GST_STATE_PLAYING);
+
+CleanUp:
+
+  // エラー時はパイプラインを解放
+  if (STATUS_FAILED(retStatus)) {
+    freeSenderPipeline(pKvsWebrtcConfig);
+  }
+
+  return retStatus;
+}
+
+/**
+ * @brief 送信用パイプラインを解放する
+ */
+STATUS freeSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
+{
+  auto retStatus = STATUS_SUCCESS;
+
+  // NULLチェック
+  CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
+
+  // パイプラインを解放
+  if (pKvsWebrtcConfig->senderPipeline) {
+    // パイプラインを停止
+    gst_element_set_state(pKvsWebrtcConfig->senderPipeline, GST_STATE_NULL);
+
+    // パイプラインの参照を解放
+    gst_object_unref(pKvsWebrtcConfig->senderPipeline);
+    pKvsWebrtcConfig->senderPipeline = nullptr;
+  }
+
+CleanUp:
+
+  return retStatus;
+}
+
+/**
+ * @brief 新しいサンプルを受信した際のコールバック
+ */
+GstFlowReturn onNewSample(GstElement* sink, gpointer data)
+{
+  auto retStatus = STATUS_SUCCESS;
+  auto ret = GST_FLOW_OK;
+  auto pKvsWebrtcConfig = reinterpret_cast<PKvsWebrtcConfig>(data);
+  GstSample* sample = nullptr;
+  GstBuffer* buffer = nullptr;
+  GstSegment* segment = nullptr;
+  GstClockTime bufferPts;
+  GstMapInfo info;
+  Frame frame;
+  BOOL isDroppable, isDelta;
+
+  // NULLチェック
+  CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
+
+  // マップ情報を初期化
+  info.data = nullptr;
+
+  // サンプルを取得
+  CHK(sample = gst_app_sink_pull_sample(GST_APP_SINK(sink)), STATUS_INTERNAL_ERROR);
+
+  // バッファを取得
+  CHK(buffer = gst_sample_get_buffer(sample), STATUS_INTERNAL_ERROR);
+
+  // ドロップすべきフレームかどうかを判定
+  isDroppable = GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED) ||
+                GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DECODE_ONLY) ||
+                (GST_BUFFER_FLAGS(buffer) == GST_BUFFER_FLAG_DISCONT) ||
+                (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT) &&
+                 GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT)) ||
+                !GST_BUFFER_PTS_IS_VALID(buffer);
+
+  // ドロップすべきフレームはスキップ
+  CHK(!isDroppable, retStatus);
+
+  // セグメントを取得
+  segment = gst_sample_get_segment(sample);
+
+  // セグメントタイムスタンプをランニングタイムに変換
+  bufferPts = gst_segment_to_running_time(segment, GST_FORMAT_TIME, buffer->pts);
+
+  // 無効なタイムスタンプはスキップ
+  if (!GST_CLOCK_TIME_IS_VALID(bufferPts)) {
+    DLOGE("Invalid PTS, dropping frame");
+    CHK(FALSE, retStatus);
+  }
+
+  // ナノ秒→100ナノ秒に変換 (SDKのHUNDREDS_OF_NANOS単位)
+  bufferPts = bufferPts / 100;
+
+  // バッファをマップ
+  CHK(gst_buffer_map(buffer, &info, GST_MAP_READ), STATUS_INTERNAL_ERROR);
+
+  // フレームフラグを設定 (デルタフレームかキーフレームか)
+  isDelta = GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+
+  // フレームを初期化
+  MEMSET(&frame, 0, SIZEOF(Frame));
+  frame.trackId = DEFAULT_VIDEO_TRACK_ID;
+  frame.duration = 0;
+  frame.version = FRAME_CURRENT_VERSION;
+  frame.size = static_cast<UINT32>(info.size);
+  frame.frameData = info.data;
+  frame.flags = isDelta ? FRAME_FLAG_NONE : FRAME_FLAG_KEY_FRAME;
+  frame.presentationTs = bufferPts;
+  frame.decodingTs = bufferPts;
+
+  // ロックを開始
+  MUTEX_LOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
+
+  // 全セッションにフレームを送信
+  for (auto&& value : pKvsWebrtcConfig->streamingSessions) {
+    // 終了していないセッションにのみ送信
+    if (!ATOMIC_LOAD_BOOL(&value.second->isTerminated)) {
+      // フレームインデックスを設定
+      frame.index = static_cast<UINT32>(ATOMIC_INCREMENT(&value.second->frameIndex));
+
+      // フレームを送信
+      auto status = writeFrame(value.second->pVideoRtcRtpTransceiver, &frame);
+      if (STATUS_FAILED(status) && status != STATUS_SRTP_NOT_READY_YET) {
+        DLOGV("writeFrame failed: 0x%08x", status);
+      }
+    }
+  }
+
+  // ロックを解除
+  MUTEX_UNLOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
+
+CleanUp:
+
+  // バッファのマップを解除
+  if (info.data) {
+    gst_buffer_unmap(buffer, &info);
+  }
+
+  // サンプルの参照を解放
+  if (sample) {
+    gst_sample_unref(sample);
+  }
+
+  // 終了フラグが立っていたらEOSを返す
+  if (ATOMIC_LOAD_BOOL(&pKvsWebrtcConfig->isTerminated)) {
+    ret = GST_FLOW_EOS;
+  }
+
+  return ret;
 }

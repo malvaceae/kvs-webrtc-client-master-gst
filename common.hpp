@@ -79,6 +79,9 @@ struct KvsWebrtcConfig {
 
   // 設定されたICEサーバーの数
   UINT32 iceUriCount;
+
+  // 送信用パイプライン
+  GstElement* senderPipeline;
 };
 
 struct KvsWebrtcStreamingSession {
@@ -106,6 +109,9 @@ struct KvsWebrtcStreamingSession {
 
   // リモートがTrickle ICEをサポートしているか
   BOOL remoteCanTrickleIce;
+
+  // フレームインデックス
+  UINT64 frameIndex;
 };
 
 // ============================================================================
@@ -260,5 +266,24 @@ VOID onConnectionStateChanged(UINT64, RTC_PEER_CONNECTION_STATE);
  * @brief シグナリングクライアントでエラーが発生した際のコールバック
  */
 STATUS onSignalingClientError(UINT64, STATUS, PCHAR, UINT32);
+
+// ============================================================================
+// GStreamer
+// ============================================================================
+
+/**
+ * @brief 送信用パイプラインを作成する
+ */
+STATUS createSenderPipeline(PKvsWebrtcConfig);
+
+/**
+ * @brief 送信用パイプラインを解放する
+ */
+STATUS freeSenderPipeline(PKvsWebrtcConfig);
+
+/**
+ * @brief 新しいサンプルを受信した際のコールバック
+ */
+GstFlowReturn onNewSample(GstElement*, gpointer);
 
 #endif

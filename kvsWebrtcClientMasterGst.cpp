@@ -30,6 +30,9 @@ INT32 main(INT32 argc, CHAR* argv[])
   // シグナリングクライアントを初期化
   CHK_STATUS(initSignaling(pKvsWebrtcConfig.get()));
 
+  // 送信用パイプラインを作成
+  CHK_STATUS(createSenderPipeline(pKvsWebrtcConfig.get()));
+
   // メインループ
   CHK_STATUS(loopSignaling(pKvsWebrtcConfig.get()));
 
