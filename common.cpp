@@ -1044,7 +1044,8 @@ CleanUp:
 STATUS createSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
-  GError* error = nullptr;
+  GError* sendError = nullptr;
+  GError* recvError = nullptr;
   GstElement* appsinkVideo = nullptr;
   GstElement* appsinkAudio = nullptr;
 
@@ -1055,117 +1056,138 @@ STATUS createSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
   pKvsWebrtcConfig->sendPipeline = gst_parse_launch(
     "rtpbin name=rtpbin "
     // Video
-    "videotestsrc is-live=true ! "
-    "video/x-raw,width=640,height=480,framerate=30/1 ! "
+    "v4l2src ! "
     "queue "
-    "  max-size-buffers=200 "
+    "  max-size-buffers=1 "
     "  leaky=downstream ! "
+    "videoconvert ! "
+    "videoscale ! "
+    "videorate ! "
+    "video/x-raw,width=640,height=480,framerate=30/1 ! "
     "clockoverlay "
     "  time-format=\"%Y-%m-%d %H:%M:%S\" "
     "  halignment=right "
     "  valignment=top ! "
-    "videoconvert ! "
-    "x264enc "
-    "  tune=zerolatency "
-    "  speed-preset=ultrafast "
-    "  bitrate=512 "
-    "  bframes=0 "
-    "  key-int-max=30 ! "
+    "v4l2h264enc extra-controls=\"encode,h264_profile=0,h264_level=30;\" ! "
+    "video/x-h264,stream-format=byte-stream,alignment=au,level=(string)3 ! "
     "h264parse config-interval=-1 ! "
-    "video/x-h264,profile=baseline,stream-format=byte-stream,alignment=au ! "
     "rtph264pay ! "
     "rtpbin.send_rtp_sink_0 "
     "rtpbin.send_rtp_src_0 ! "
     "udpsink "
-    "  host=127.0.0.1 "
+    "  host=225.0.0.37 "
     "  port=50000 "
+    "  multicast-iface=lo "
+    "  ttl-mc=0 "
+    "  bind-address=127.0.0.1 "
     "  async=false "
     "  sync=true "
     "rtpbin.send_rtcp_src_0 ! "
     "udpsink "
-    "  host=127.0.0.1 "
+    "  host=225.0.0.37 "
     "  port=50001 "
+    "  multicast-iface=lo "
+    "  ttl-mc=0 "
+    "  bind-address=127.0.0.1 "
     "  async=false "
     "  sync=false "
     // Audio
-    "audiotestsrc is-live=true ! "
+    "alsasrc device=plughw:CARD=WEBCAM,DEV=0 ! "
     "queue "
-    "  max-size-buffers=400 "
+    "  max-size-buffers=1 "
     "  leaky=downstream ! "
     "audioconvert ! "
     "audioresample ! "
     "opusenc ! "
+    "audio/x-opus,rate=48000,channels=2 ! "
     "rtpopuspay ! "
     "rtpbin.send_rtp_sink_1 "
     "rtpbin.send_rtp_src_1 ! "
     "udpsink "
-    "  host=127.0.0.1 "
+    "  host=225.0.0.37 "
     "  port=50002 "
+    "  multicast-iface=lo "
+    "  ttl-mc=0 "
+    "  bind-address=127.0.0.1 "
     "  async=false "
     "  sync=true "
     "rtpbin.send_rtcp_src_1 ! "
     "udpsink "
-    "  host=127.0.0.1 "
+    "  host=225.0.0.37 "
     "  port=50003 "
+    "  multicast-iface=lo "
+    "  ttl-mc=0 "
+    "  bind-address=127.0.0.1 "
     "  async=false "
     "  sync=false",
-    &error);
+    &sendError);
 
   // エラーチェック
-  if (error) {
-    DLOGE("Failed to create sender pipeline: %s", error->message);
-    g_error_free(error);
+  if (sendError) {
+    DLOGE("Failed to create sender pipeline: %s", sendError->message);
+    g_error_free(sendError);
     CHK(FALSE, STATUS_INTERNAL_ERROR);
   }
 
   // 受信用パイプラインを作成 (UDP受信 → rtpbin → appsink)
-  error = nullptr;
   pKvsWebrtcConfig->recvPipeline = gst_parse_launch(
     "rtpbin name=rtpbin "
     // Video受信
     "udpsrc "
+    "  address=225.0.0.37 "
     "  port=50000 "
+    "  multicast-iface=lo "
     "  caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264\" ! "
     "rtpbin.recv_rtp_sink_0 "
     "udpsrc "
+    "  address=225.0.0.37 "
     "  port=50001 "
+    "  multicast-iface=lo "
     "  caps=\"application/x-rtcp\" ! "
     "rtpbin.recv_rtcp_sink_0 "
     // Audio受信
     "udpsrc "
+    "  address=225.0.0.37 "
     "  port=50002 "
+    "  multicast-iface=lo "
     "  caps=\"application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS\" ! "
     "rtpbin.recv_rtp_sink_1 "
     "udpsrc "
+    "  address=225.0.0.37 "
     "  port=50003 "
+    "  multicast-iface=lo "
     "  caps=\"application/x-rtcp\" ! "
     "rtpbin.recv_rtcp_sink_1 "
     // Video出力
     "rtpbin. ! "
     "rtph264depay ! "
-    "queue ! "
+    "queue "
+    "  max-size-buffers=1 "
+    "  leaky=downstream ! "
     "h264parse ! "
     "video/x-h264,stream-format=byte-stream,alignment=au ! "
     "appsink "
     "  name=appsink-video "
     "  emit-signals=true "
     "  async=false "
-    "  sync=true "
+    "  sync=false "
     // Audio出力
     "rtpbin. ! "
     "rtpopusdepay ! "
-    "queue ! "
+    "queue "
+    "  max-size-buffers=1 "
+    "  leaky=downstream ! "
     "appsink "
     "  name=appsink-audio "
     "  emit-signals=true "
     "  async=false "
-    "  sync=true",
-    &error);
+    "  sync=false",
+    &recvError);
 
   // エラーチェック
-  if (error) {
-    DLOGE("Failed to create receiver pipeline: %s", error->message);
-    g_error_free(error);
+  if (recvError) {
+    DLOGE("Failed to create receiver pipeline: %s", recvError->message);
+    g_error_free(recvError);
     CHK(FALSE, STATUS_INTERNAL_ERROR);
   }
 
@@ -1233,8 +1255,10 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data, UINT64 trackId)
   GstSample* sample = nullptr;
   GstBuffer* buffer = nullptr;
   GstSegment* segment = nullptr;
-  GstClockTime bufferPts;
   GstMapInfo info;
+  GstClockTime duration = GST_CLOCK_TIME_NONE;
+  UINT64 ptsHundredsNanos = 0;
+  UINT64 durationHundredsNanos = 0;
   Frame frame;
   BOOL isDroppable, isDelta;
   PRtcRtpTransceiver pRtcRtpTransceiver = nullptr;
@@ -1262,37 +1286,32 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data, UINT64 trackId)
   // ドロップすべきフレームはスキップ
   CHK(!isDroppable, retStatus);
 
-  // セグメントを取得
-  segment = gst_sample_get_segment(sample);
-
-  // セグメントタイムスタンプをランニングタイムに変換
-  bufferPts = gst_segment_to_running_time(segment, GST_FORMAT_TIME, buffer->pts);
-
-  // 無効なタイムスタンプはスキップ
-  if (!GST_CLOCK_TIME_IS_VALID(bufferPts)) {
-    DLOGE("Invalid PTS, dropping frame");
-    CHK(FALSE, retStatus);
-  }
-
-  // ナノ秒→100ナノ秒に変換 (SDKのHUNDREDS_OF_NANOS単位)
-  bufferPts = bufferPts / 100;
-
   // バッファをマップ
   CHK(gst_buffer_map(buffer, &info, GST_MAP_READ), STATUS_INTERNAL_ERROR);
 
   // フレームフラグを設定 (デルタフレームかキーフレームか)
   isDelta = GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
 
+  // セグメントを取得
+  segment = gst_sample_get_segment(sample);
+
+  // ランニングタイムを取得して100ナノ秒単位に変換
+  ptsHundredsNanos = gst_segment_to_running_time(segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buffer)) / 100;
+
+  // フレーム長を取得して100ナノ秒単位に変換
+  duration = GST_BUFFER_DURATION(buffer);
+  if (GST_CLOCK_TIME_IS_VALID(duration)) {
+    durationHundredsNanos = duration / 100;
+  }
+
   // フレームを初期化
   MEMSET(&frame, 0, SIZEOF(Frame));
-  frame.trackId = trackId;
-  frame.duration = 0;
   frame.version = FRAME_CURRENT_VERSION;
+  frame.flags = isDelta ? FRAME_FLAG_NONE : FRAME_FLAG_KEY_FRAME;
+  frame.duration = durationHundredsNanos;
   frame.size = static_cast<UINT32>(info.size);
   frame.frameData = info.data;
-  frame.flags = isDelta ? FRAME_FLAG_NONE : FRAME_FLAG_KEY_FRAME;
-  frame.presentationTs = bufferPts;
-  frame.decodingTs = bufferPts;
+  frame.trackId = trackId;
 
   // ロックを開始
   MUTEX_LOCK(pKvsWebrtcConfig->kvsWebrtcConfigObjLock);
@@ -1304,10 +1323,17 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data, UINT64 trackId)
       // フレームインデックスを設定
       frame.index = static_cast<UINT32>(ATOMIC_INCREMENT(&value.second->frameIndex));
 
-      // トランシーバーを選択
-      pRtcRtpTransceiver = (trackId == DEFAULT_AUDIO_TRACK_ID)
-        ? value.second->pAudioRtcRtpTransceiver
-        : value.second->pVideoRtcRtpTransceiver;
+      // トラックIDに応じてトランシーバーとタイムスタンプを選択
+      // ビデオは到着時刻ベース、オーディオはPTSベースのタイムスタンプを使用
+      if (trackId == DEFAULT_VIDEO_TRACK_ID) {
+        pRtcRtpTransceiver = value.second->pVideoRtcRtpTransceiver;
+        frame.presentationTs = g_get_monotonic_time() * 10;
+        frame.decodingTs = frame.presentationTs;
+      } else {
+        pRtcRtpTransceiver = value.second->pAudioRtcRtpTransceiver;
+        frame.presentationTs = ptsHundredsNanos;
+        frame.decodingTs = frame.presentationTs;
+      }
 
       // フレームを送信
       auto status = writeFrame(pRtcRtpTransceiver, &frame);
