@@ -275,9 +275,9 @@ STATUS onSignalingClientError(UINT64, STATUS, PCHAR, UINT32);
 // ============================================================================
 
 /**
- * @brief 送信用パイプラインを作成する
+ * @brief GStreamerパイプラインを作成する
  */
-STATUS createSenderPipeline(PKvsWebrtcConfig);
+STATUS createGstPipelines(PKvsWebrtcConfig);
 
 /**
  * @brief 送信用パイプラインを解放する

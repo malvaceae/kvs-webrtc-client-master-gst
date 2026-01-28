@@ -1039,9 +1039,9 @@ CleanUp:
 // ============================================================================
 
 /**
- * @brief 送信用パイプラインを作成する
+ * @brief GStreamerパイプラインを作成する
  */
-STATUS createSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
+STATUS createGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
   GError* sendError = nullptr;
