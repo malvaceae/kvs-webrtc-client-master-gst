@@ -990,11 +990,6 @@ VOID onConnectionStateChanged(UINT64 customData, RTC_PEER_CONNECTION_STATE state
     case RTC_PEER_CONNECTION_STATE_DISCONNECTED:
       // 終了フラグをON
       ATOMIC_STORE_BOOL(&pStreamingSession->isTerminated, TRUE);
-
-      // ブロックを解除
-      if (IS_VALID_CVAR_VALUE(pKvsWebrtcConfig->cvar)) {
-        CVAR_BROADCAST(pKvsWebrtcConfig->cvar);
-      }
     default:
       // 接続フラグをOFF
       ATOMIC_STORE_BOOL(&pKvsWebrtcConfig->isConnected, FALSE);
