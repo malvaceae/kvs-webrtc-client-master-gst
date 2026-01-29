@@ -166,8 +166,8 @@ STATUS freeKvsWebrtcConfig(std::unique_ptr<KvsWebrtcConfig>& pKvsWebrtcConfig)
     CVAR_FREE(pKvsWebrtcConfig->cvar);
   }
 
-  // 送信用パイプラインを解放
-  freeSenderPipeline(pKvsWebrtcConfig.get());
+  // GStreamerパイプラインを解放
+  freeGstPipelines(pKvsWebrtcConfig.get());
 
   // ストリーミングセッションを解放
   for (auto&& value : pKvsWebrtcConfig->streamingSessions) {
@@ -1047,7 +1047,7 @@ STATUS createGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
   // NULLチェック
   CHK(pKvsWebrtcConfig, STATUS_NULL_ARG);
 
-  // 送信用パイプラインを作成 (カメラ/マイク → rtpbin → UDP送信)
+  // 送信用パイプラインを作成
   pKvsWebrtcConfig->sendPipeline = gst_parse_launch(
     "rtpbin name=rtpbin "
     // Video
@@ -1124,7 +1124,7 @@ STATUS createGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
     CHK(FALSE, STATUS_INTERNAL_ERROR);
   }
 
-  // 受信用パイプラインを作成 (UDP受信 → rtpbin → appsink)
+  // 受信用パイプラインを作成
   pKvsWebrtcConfig->recvPipeline = gst_parse_launch(
     "rtpbin name=rtpbin "
     // Video受信
@@ -1204,16 +1204,16 @@ CleanUp:
 
   // エラー時はパイプラインを解放
   if (STATUS_FAILED(retStatus)) {
-    freeSenderPipeline(pKvsWebrtcConfig);
+    freeGstPipelines(pKvsWebrtcConfig);
   }
 
   return retStatus;
 }
 
 /**
- * @brief 送信用パイプラインを解放する
+ * @brief GStreamerパイプラインを解放する
  */
-STATUS freeSenderPipeline(PKvsWebrtcConfig pKvsWebrtcConfig)
+STATUS freeGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
 {
   auto retStatus = STATUS_SUCCESS;
 

@@ -80,10 +80,10 @@ struct KvsWebrtcConfig {
   // 設定されたICEサーバーの数
   UINT32 iceUriCount;
 
-  // 送信用パイプライン (カメラ/マイク → rtpbin → UDP送信)
+  // 送信用パイプライン
   GstElement* sendPipeline;
 
-  // 受信用パイプライン (UDP受信 → rtpbin → appsink)
+  // 受信用パイプライン
   GstElement* recvPipeline;
 };
 
@@ -280,9 +280,9 @@ STATUS onSignalingClientError(UINT64, STATUS, PCHAR, UINT32);
 STATUS createGstPipelines(PKvsWebrtcConfig);
 
 /**
- * @brief 送信用パイプラインを解放する
+ * @brief GStreamerパイプラインを解放する
  */
-STATUS freeSenderPipeline(PKvsWebrtcConfig);
+STATUS freeGstPipelines(PKvsWebrtcConfig);
 
 /**
  * @brief 新しいサンプルを受信した際の共通処理
