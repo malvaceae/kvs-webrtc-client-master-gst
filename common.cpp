@@ -1053,7 +1053,7 @@ STATUS createGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
     // Video
     "v4l2src ! "
     "queue "
-    "  max-size-buffers=1 "
+    "  max-size-buffers=240 "
     "  leaky=downstream ! "
     "videoconvert ! "
     "videoscale ! "
@@ -1089,7 +1089,7 @@ STATUS createGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
     // Audio
     "alsasrc device=plughw:CARD=WEBCAM,DEV=0 ! "
     "queue "
-    "  max-size-buffers=1 "
+    "  max-size-buffers=400 "
     "  leaky=downstream ! "
     "audioconvert ! "
     "audioresample ! "
@@ -1156,27 +1156,27 @@ STATUS createGstPipelines(PKvsWebrtcConfig pKvsWebrtcConfig)
     // Video出力
     "rtpbin. ! "
     "rtph264depay ! "
-    "queue "
-    "  max-size-buffers=1 "
-    "  leaky=downstream ! "
-    "h264parse ! "
     "video/x-h264,stream-format=byte-stream,alignment=au ! "
+    "h264parse ! "
+    "queue "
+    "  max-size-buffers=240 "
+    "  leaky=downstream ! "
     "appsink "
     "  name=appsink-video "
     "  emit-signals=true "
     "  async=false "
-    "  sync=false "
+    "  sync=true "
     // Audio出力
     "rtpbin. ! "
     "rtpopusdepay ! "
     "queue "
-    "  max-size-buffers=1 "
+    "  max-size-buffers=400 "
     "  leaky=downstream ! "
     "appsink "
     "  name=appsink-audio "
     "  emit-signals=true "
     "  async=false "
-    "  sync=false",
+    "  sync=true",
     &recvError);
 
   // エラーチェック
@@ -1322,7 +1322,7 @@ GstFlowReturn onNewSample(GstElement* sink, gpointer data, UINT64 trackId)
       // ビデオは到着時刻ベース、オーディオはPTSベースのタイムスタンプを使用
       if (trackId == DEFAULT_VIDEO_TRACK_ID) {
         pRtcRtpTransceiver = value.second->pVideoRtcRtpTransceiver;
-        frame.presentationTs = g_get_monotonic_time() * 10;
+        frame.presentationTs = GETTIME();
         frame.decodingTs = frame.presentationTs;
       } else {
         pRtcRtpTransceiver = value.second->pAudioRtcRtpTransceiver;
